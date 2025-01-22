@@ -743,7 +743,7 @@ pub fn get_next_recipients<U: RewardSetProvider>(
     )?;
     sort_db
         .get_next_block_recipients(burnchain, sortition_tip, reward_cycle_info.as_ref())
-        .map_err(|e| Error::from(e))
+        .map_err(Error::from)
 }
 
 /// returns None if this burnchain block is _not_ the start of a reward cycle
@@ -864,7 +864,7 @@ pub fn get_reward_cycle_info<U: RewardSetProvider>(
 
         let mut tx = sort_db.tx_begin()?;
         let preprocessed_reward_set =
-            SortitionDB::get_preprocessed_reward_set(&mut tx, &first_prepare_sn.sortition_id)?;
+            SortitionDB::get_preprocessed_reward_set(&tx, &first_prepare_sn.sortition_id)?;
 
         // It's possible that we haven't processed the PoX anchor block at the time we have
         // processed the burnchain block which commits to it.  In this case, the PoX anchor block
@@ -1238,8 +1238,8 @@ impl<
                             continue;
                         }
                         Err(e) => {
-                            error!("Failed to query affirmation map: {:?}", &e);
-                            return Err(e.into());
+                            error!("Failed to query affirmation map: {e:?}");
+                            return Err(e);
                         }
                     };
 
@@ -2097,9 +2097,7 @@ impl<
             // by holding this lock as long as we do, we ensure that the sortition DB's
             // view of the canonical stacks chain tip can't get changed (since no
             // Stacks blocks can be processed).
-            chainstate_db_tx
-                .commit()
-                .map_err(|e| DBError::SqliteError(e))?;
+            chainstate_db_tx.commit().map_err(DBError::SqliteError)?;
 
             let highest_valid_snapshot = SortitionDB::get_block_snapshot(
                 &self.sortition_db.conn(),
@@ -2310,9 +2308,9 @@ impl<
                 canonical_snapshot.canonical_stacks_tip_height,
             );
 
-            let mut tx = self.sortition_db.tx_begin()?;
+            let tx = self.sortition_db.tx_begin()?;
             SortitionDB::revalidate_snapshot_with_block(
-                &mut tx,
+                &tx,
                 &new_sortition_id,
                 &canonical_snapshot.canonical_stacks_tip_consensus_hash,
                 &canonical_snapshot.canonical_stacks_tip_hash,
@@ -2787,9 +2785,7 @@ impl<
                         invalidation_height,
                     )?;
                 }
-                chainstate_db_tx
-                    .commit()
-                    .map_err(|e| DBError::SqliteError(e))?;
+                chainstate_db_tx.commit().map_err(DBError::SqliteError)?;
             }
 
             let sortition_id = next_snapshot.sortition_id;

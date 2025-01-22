@@ -475,7 +475,7 @@ impl StacksChainState {
 
         let _ = StacksChainState::mkdirs(&block_path)?;
 
-        block_path.push(format!("{}", to_hex(block_hash_bytes)));
+        block_path.push(to_hex(block_hash_bytes).to_string());
         let blocks_path_str = block_path
             .to_str()
             .ok_or_else(|| Error::DBError(db_error::ParseError))?
@@ -915,7 +915,7 @@ impl StacksChainState {
         // gather
         let mut blobs = vec![];
 
-        while let Some(row) = rows.next().map_err(|e| db_error::SqliteError(e))? {
+        while let Some(row) = rows.next().map_err(db_error::SqliteError)? {
             let next_blob: Vec<u8> = row.get_unwrap(0);
             blobs.push(next_blob);
         }
@@ -1732,7 +1732,7 @@ impl StacksChainState {
 
         // gather
         let mut row_data: Vec<i64> = vec![];
-        while let Some(row) = rows.next().map_err(|e| db_error::SqliteError(e))? {
+        while let Some(row) = rows.next().map_err(db_error::SqliteError)? {
             let val_opt: Option<i64> = row.get_unwrap(0);
             if let Some(val) = val_opt {
                 row_data.push(val);
@@ -3860,7 +3860,7 @@ impl StacksChainState {
                 .query(NO_PARAMS)
                 .map_err(|e| Error::DBError(db_error::SqliteError(e)))?;
 
-            while let Some(row) = rows.next().map_err(|e| db_error::SqliteError(e))? {
+            while let Some(row) = rows.next().map_err(db_error::SqliteError)? {
                 let mut candidate = StagingBlock::from_row(&row).map_err(Error::DBError)?;
 
                 // block must correspond to a valid PoX snapshot
@@ -4031,7 +4031,7 @@ impl StacksChainState {
                 tx_receipt.tx_index = u32::try_from(tx_index).expect("more than 2^32 items");
                 fees = fees.checked_add(u128::from(tx_fee)).expect("Fee overflow");
                 burns = burns
-                    .checked_add(u128::from(tx_receipt.stx_burned))
+                    .checked_add(tx_receipt.stx_burned)
                     .expect("Burns overflow");
                 receipts.push(tx_receipt);
             }
@@ -4585,7 +4585,7 @@ impl StacksChainState {
             fees = fees.checked_add(u128::from(tx_fee)).expect("Fee overflow");
             tx_receipt.tx_index = tx_index;
             burns = burns
-                .checked_add(u128::from(tx_receipt.stx_burned))
+                .checked_add(tx_receipt.stx_burned)
                 .expect("Burns overflow");
             receipts.push(tx_receipt);
             tx_index += 1;
@@ -5656,7 +5656,7 @@ impl StacksChainState {
                     }
                 };
 
-            tx_receipts.extend(txs_receipts.into_iter());
+            tx_receipts.extend(txs_receipts);
 
             let block_cost = clarity_tx.cost_so_far();
 
@@ -5784,7 +5784,7 @@ impl StacksChainState {
             )
             .expect("FATAL: parsed and processed a block without a coinbase");
 
-            tx_receipts.extend(microblock_txs_receipts.into_iter());
+            tx_receipts.extend(microblock_txs_receipts);
 
             (
                 scheduled_miner_reward,
@@ -6691,7 +6691,7 @@ impl StacksChainState {
         let epoch = clarity_connection.get_epoch().clone();
 
         StacksChainState::process_transaction_precheck(&chainstate_config, &tx, epoch)
-            .map_err(|e| MemPoolRejection::FailedToValidate(e))?;
+            .map_err(MemPoolRejection::FailedToValidate)?;
 
         // 3: it must pay a tx fee
         let fee = tx.get_tx_fee();
@@ -6883,7 +6883,7 @@ impl StacksChainState {
                             epoch,
                             clarity_version,
                         )
-                        .map_err(|e| MemPoolRejection::BadFunctionArgument(e))
+                        .map_err(MemPoolRejection::BadFunctionArgument)
                 })?;
             }
             TransactionPayload::SmartContract(
@@ -10293,7 +10293,7 @@ pub mod test {
                     let mut mempool =
                         MemPoolDB::open_test(false, 0x80000000, &chainstate_path).unwrap();
                     let coinbase_tx =
-                        make_coinbase_with_nonce(miner, tenure_id as usize, tenure_id.into(), None);
+                        make_coinbase_with_nonce(miner, tenure_id as usize, tenure_id, None);
 
                     let microblock_privkey = StacksPrivateKey::new();
                     let microblock_pubkeyhash = Hash160::from_node_public_key(

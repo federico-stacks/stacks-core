@@ -578,12 +578,11 @@ impl<T: MarfTrieId> TrieRAM<T> {
         // write parent block ptr
         f.seek(SeekFrom::Start(0))?;
         f.write_all(parent_hash.as_bytes())
-            .map_err(|e| Error::IOError(e))?;
+            .map_err(Error::IOError)?;
         // write zero-identifier (TODO: this is a convenience hack for now, we should remove the
         //    identifier from the trie data blob)
         f.seek(SeekFrom::Start(BLOCK_HEADER_HASH_ENCODED_SIZE as u64))?;
-        f.write_all(&0u32.to_le_bytes())
-            .map_err(|e| Error::IOError(e))?;
+        f.write_all(&0u32.to_le_bytes()).map_err(Error::IOError)?;
 
         for (ix, indirect) in node_data_order.iter().enumerate() {
             // dump the node to storage
@@ -2047,12 +2046,8 @@ impl<T: MarfTrieId> TrieStorageConnection<'_, T> {
     #[cfg(test)]
     fn inner_read_persisted_root_to_blocks(&mut self) -> Result<HashMap<TrieHash, T>, Error> {
         let ret = match self.blobs.as_mut() {
-            Some(blobs) => {
-                HashMap::from_iter(blobs.read_all_block_hashes_and_roots(&self.db)?.into_iter())
-            }
-            None => {
-                HashMap::from_iter(trie_sql::read_all_block_hashes_and_roots(&self.db)?.into_iter())
-            }
+            Some(blobs) => HashMap::from_iter(blobs.read_all_block_hashes_and_roots(&self.db)?),
+            None => HashMap::from_iter(trie_sql::read_all_block_hashes_and_roots(&self.db)?),
         };
         Ok(ret)
     }
