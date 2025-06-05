@@ -19,24 +19,27 @@ pub mod log;
 #[macro_use]
 pub mod macros;
 pub mod chunked_encoding;
+#[cfg(feature = "rusqlite")]
 pub mod db;
 pub mod hash;
+pub mod lru_cache;
 pub mod pair;
 pub mod pipe;
 pub mod retry;
 pub mod secp256k1;
+pub mod serde_serializers;
 pub mod uint;
 pub mod vrf;
 
-use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufReader, BufWriter, Write};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 use std::{error, fmt, thread, time};
 
 /// Given a relative path inside the Cargo workspace, return the absolute path
-pub fn cargo_workspace<P>(relative_path: P) -> PathBuf
+#[cfg(any(test, feature = "testing"))]
+pub fn cargo_workspace<P>(relative_path: P) -> std::path::PathBuf
 where
     P: AsRef<Path>,
 {
@@ -107,6 +110,10 @@ impl error::Error for HexError {
             HexError::BadCharacter(_) => "bad hex character",
         }
     }
+}
+
+pub trait HexDeser: Sized {
+    fn try_from_hex(hex: &str) -> Result<Self, HexError>;
 }
 
 /// Write any `serde_json` object directly to a file

@@ -19,6 +19,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::{Read, Write};
 use std::net::SocketAddr;
 
+use p2p::DropSource;
 use rand;
 use rand::seq::SliceRandom;
 use rand::{thread_rng, Rng};
@@ -39,7 +40,7 @@ use crate::net::codec::*;
 use crate::net::connection::{ConnectionOptions, ConnectionP2P, ReplyHandleP2P};
 use crate::net::db::{PeerDB, *};
 use crate::net::neighbors::MAX_NEIGHBOR_BLOCK_DELAY;
-use crate::net::p2p::{PeerNetwork, PeerNetworkWorkState};
+use crate::net::p2p::{DropReason, PeerNetwork, PeerNetworkWorkState};
 use crate::net::{
     Error as net_error, GetBlocksInv, Neighbor, NeighborKey, PeerAddress, StacksMessage, StacksP2P,
     *,
@@ -693,7 +694,7 @@ impl NeighborBlockStats {
         self.status = NeighborBlockStats::diagnose_nack(
             &self.nk,
             nack_data,
-            &chain_view,
+            chain_view,
             preamble_burn_block_height,
             preamble_burn_stable_block_height,
             preamble_burn_block_hash,
@@ -792,7 +793,7 @@ impl NeighborBlockStats {
                     StacksMessageType::Nack(nack_data) => {
                         debug!("Remote neighbor {:?} nack'ed our GetPoxInv at reward cycle {}: NACK code {}", &self.nk, self.target_pox_reward_cycle, nack_data.error_code);
                         let is_bootstrap_peer = PeerDB::is_initial_peer(
-                            &network.peerdb.conn(),
+                            network.peerdb.conn(),
                             self.nk.network_id,
                             &self.nk.addrbytes,
                             self.nk.port,
@@ -892,7 +893,7 @@ impl NeighborBlockStats {
                     StacksMessageType::Nack(nack_data) => {
                         debug!("Remote neighbor {:?} nack'ed our GetBlocksInv at reward cycle {}: NACK code {}", &self.nk, self.target_block_reward_cycle, nack_data.error_code);
                         let is_bootstrap_peer = PeerDB::is_initial_peer(
-                            &network.peerdb.conn(),
+                            network.peerdb.conn(),
                             self.nk.network_id,
                             &self.nk.addrbytes,
                             self.nk.port,
@@ -1024,7 +1025,7 @@ impl InvState {
             if let Some(stats) = self.block_stats.get_mut(peer) {
                 debug!("Already tracking inventories of peer {:?}", &peer);
                 stats.reset_pox_scan(0);
-                stats.is_bootstrap_peer = bootstrap_peers.contains(&peer);
+                stats.is_bootstrap_peer = bootstrap_peers.contains(peer);
             } else if self.block_stats.len() < max_neighbors {
                 debug!("Will track inventories of new peer {:?}", &peer);
                 self.block_stats.insert(
@@ -1032,7 +1033,7 @@ impl InvState {
                     NeighborBlockStats::new(
                         peer.clone(),
                         self.first_block_height,
-                        bootstrap_peers.contains(&peer),
+                        bootstrap_peers.contains(peer),
                     ),
                 );
                 added += 1;
@@ -1051,7 +1052,7 @@ impl InvState {
         // if we're still connected to these peers, then keep them pinned
         self.pinned.clear();
         for peer in peers.iter() {
-            if let Some(event_id) = network.get_event_id(&peer) {
+            if let Some(event_id) = network.get_event_id(peer) {
                 self.pinned.insert(event_id);
             }
         }
@@ -1147,6 +1148,56 @@ impl InvState {
         list
     }
 
+    /// Returns the highest Stacks tip height reported by the given neighbors.
+    ///
+    /// This function iterates through the provided neighbors, checks their block stats,
+    /// and determines the maximum block height. The status of the neighbor (Online or Diverged during IBD,
+    /// or Online when not in IBD) is considered.
+    ///
+    /// # Arguments
+    ///
+    /// * `neighbors` - A slice of `Neighbor` structs to check.
+    /// * `ibd` - A boolean indicating if the node is in Initial Block Download (IBD) mode.
+    ///
+    /// # Returns
+    ///
+    /// * `Some(u64)` if at least one neighbor has a tip height according to its status.
+    /// * `None` if no tip heights are found.
+    pub fn get_max_stacks_height_of_neighbors(
+        &self,
+        neighbors: &[Neighbor],
+        ibd: bool,
+    ) -> Option<u64> {
+        let mut max_height: u64 = 1;
+        let mut stats_obtained = false;
+        for neighbor in neighbors {
+            let nk = &neighbor.addr;
+            match self.block_stats.get(nk) {
+                Some(stats) => {
+                    // When a node is in IBD, it occasionally might think a remote peer has diverged from it (for
+                    // example, if it starts processing reward cycle N+1 before obtaining the anchor block for
+                    // reward cycle N).
+                    if (ibd
+                        && (stats.status == NodeStatus::Online
+                            || stats.status == NodeStatus::Diverged))
+                        || (!ibd && stats.status == NodeStatus::Online)
+                    {
+                        let height = stats.inv.get_block_height();
+                        max_height = max_height.max(height);
+                        stats_obtained = true;
+                    }
+                }
+                None => {}
+            }
+        }
+
+        if stats_obtained {
+            Some(max_height)
+        } else {
+            None
+        }
+    }
+
     /// Get the list of dead
     pub fn get_dead_peers(&self) -> Vec<NeighborKey> {
         let mut list = vec![];
@@ -1175,7 +1226,7 @@ impl InvState {
     }
 
     pub fn del_peer(&mut self, nk: &NeighborKey) {
-        self.block_stats.remove(&nk);
+        self.block_stats.remove(nk);
     }
 
     /// Is there any downloader-actionable data available?
@@ -1211,7 +1262,7 @@ impl InvState {
         consensus_hash: &ConsensusHash,
         microblocks: bool,
     ) -> Result<Option<u64>, net_error> {
-        let sn = match SortitionDB::get_block_snapshot_consensus(sortdb.conn(), &consensus_hash)? {
+        let sn = match SortitionDB::get_block_snapshot_consensus(sortdb.conn(), consensus_hash)? {
             Some(sn) => {
                 if !sn.pox_valid {
                     debug!(
@@ -1534,15 +1585,12 @@ impl PeerNetwork {
         }
 
         // does the peer agree with our PoX view up to this reward cycle?
-        match stats.inv.pox_inv_cmp(&self.pox_id) {
-            Some((disagreed, _, _)) => {
-                if disagreed < target_block_reward_cycle {
-                    // can't proceed
-                    debug!("{:?}: remote neighbor {:?} disagrees with our PoX inventory at reward cycle {} (asked for {})", &self.local_peer, nk, disagreed, target_block_reward_cycle);
-                    return Ok(0);
-                }
+        if let Some((disagreed, _, _)) = stats.inv.pox_inv_cmp(&self.pox_id) {
+            if disagreed < target_block_reward_cycle {
+                // can't proceed
+                debug!("{:?}: remote neighbor {:?} disagrees with our PoX inventory at reward cycle {} (asked for {})", &self.local_peer, nk, disagreed, target_block_reward_cycle);
+                return Ok(0);
             }
-            None => {}
         }
 
         let target_block_height = self
@@ -1842,15 +1890,12 @@ impl PeerNetwork {
         };
 
         let payload = StacksMessageType::GetPoxInv(getpoxinv);
-        let event_id_opt = self.get_event_id(&nk);
+        let event_id_opt = self.get_event_id(nk);
 
         let message = self.sign_for_neighbor(nk, payload)?;
         let request = self
             .send_neighbor_message(nk, message, request_timeout)
-            .map_err(|e| {
-                debug!("Failed to send GetPoxInv to {:?}: {:?}", &nk, &e);
-                e
-            })?;
+            .inspect_err(|e| debug!("Failed to send GetPoxInv to {nk:?}: {e:?}"))?;
 
         stats.getpoxinv_begin(request, target_pox_reward_cycle);
         if let Some(event_id) = event_id_opt {
@@ -2040,10 +2085,7 @@ impl PeerNetwork {
         let message = self.sign_for_neighbor(nk, payload)?;
         let request = self
             .send_neighbor_message(nk, message, request_timeout)
-            .map_err(|e| {
-                debug!("Failed to send GetPoxInv to {:?}: {:?}", &nk, &e);
-                e
-            })?;
+            .inspect_err(|e| debug!("Failed to send GetPoxInv to {nk:?}: {e:?}"))?;
 
         stats.getblocksinv_begin(request, target_block_reward_cycle, num_blocks_expected);
         if let Some(event_id) = event_id_opt {
@@ -2274,8 +2316,8 @@ impl PeerNetwork {
             let mut ibd_diverged_height: Option<u64> = None;
 
             let bootstrap_peers: HashSet<_> =
-                PeerDB::get_bootstrap_peers(&network.peerdb.conn(), network.local_peer.network_id)
-                    .unwrap_or(vec![])
+                PeerDB::get_bootstrap_peers(network.peerdb.conn(), network.local_peer.network_id)
+                    .unwrap_or_default()
                     .into_iter()
                     .map(|neighbor| neighbor.addr)
                     .collect();
@@ -2311,7 +2353,7 @@ impl PeerNetwork {
                 );
                 if !stats.done {
                     match network.inv_sync_run(&mut new_pins, sortdb, nk, stats, inv_state.request_timeout, ibd) {
-                        Ok(d) => d,
+                        Ok(_) => {}
                         Err(net_error::StaleView) => {
                             // stop work on this state machine -- it needs to be restarted.
                             // we'll need to keep scanning.
@@ -2319,19 +2361,16 @@ impl PeerNetwork {
                             stats.done = true;
                             inv_state.hint_learned_data = true;
                             inv_state.hint_learned_data_height = u64::MAX;
-                            true
                         }
                         Err(net_error::PeerNotConnected) | Err(net_error::SendError(..)) => {
                             stats.status = NodeStatus::Dead;
-                            true
                         }
                         Err(e) => {
                             debug!(
-                                "{:?}: remote neighbor inv_sync_run finished with error {:?}",
-                                &network.local_peer, &e
+                                "{:?}: remote neighbor inv_sync_run finished with error {e:?}",
+                                &network.local_peer
                             );
                             stats.status = NodeStatus::Broken;
-                            true
                         }
                     };
 
@@ -2340,7 +2379,7 @@ impl PeerNetwork {
                         // if this node diverged from us, and we're in ibd, and this is an
                         // always-allowed peer, then start scanning here (or lower)
                         if ibd
-                            && bootstrap_peers.contains(&nk)
+                            && bootstrap_peers.contains(nk)
                             && stats.status == NodeStatus::Diverged
                         {
                             inv_state.last_change_at = get_epoch_time_secs();
@@ -2523,13 +2562,10 @@ impl PeerNetwork {
         let mut cur_neighbors = HashSet::new();
         for (nk, event_id) in self.events.iter() {
             // only outbound authenticated peers
-            match self.peers.get(event_id) {
-                Some(convo) => {
-                    if convo.is_outbound() && convo.is_authenticated() {
-                        cur_neighbors.insert(nk.clone());
-                    }
+            if let Some(convo) = self.peers.get(event_id) {
+                if convo.is_outbound() && convo.is_authenticated() {
+                    cur_neighbors.insert(nk.clone());
                 }
-                None => {}
             }
         }
 
@@ -2543,17 +2579,14 @@ impl PeerNetwork {
 
     /// Set a hint that we learned something new, and need to sync invs again
     pub fn hint_sync_invs(&mut self, target_height: u64) {
-        match self.inv_state {
-            Some(ref mut inv_state) => {
-                debug!(
-                    "Awaken inv sync to re-scan peer block inventories at height {}",
-                    target_height
-                );
-                inv_state.hint_learned_data = true;
-                inv_state.hint_do_rescan = true;
-                inv_state.hint_learned_data_height = target_height;
-            }
-            None => {}
+        if let Some(ref mut inv_state) = self.inv_state {
+            debug!(
+                "Awaken inv sync to re-scan peer block inventories at height {}",
+                target_height
+            );
+            inv_state.hint_learned_data = true;
+            inv_state.hint_do_rescan = true;
+            inv_state.hint_learned_data_height = target_height;
         }
     }
 
@@ -2605,18 +2638,13 @@ impl PeerNetwork {
         // if this succeeds, then we should be able to make a BlocksInv
         let ancestor_sn = self
             .get_ancestor_sortition_snapshot(sortdb, target_block_height)
-            .map_err(|e| {
-                debug!(
-                    "Failed to load ancestor sortition snapshot at height {}: {:?}",
-                    target_block_height, &e
-                );
-                e
+            .inspect_err(|e| {
+                debug!( "Failed to load ancestor sortition snapshot at height {target_block_height}: {e:?}")
             })?;
 
-        let tip_sn = self.get_tip_sortition_snapshot(sortdb).map_err(|e| {
-            debug!("Failed to load tip sortition snapshot: {:?}", &e);
-            e
-        })?;
+        let tip_sn = self
+            .get_tip_sortition_snapshot(sortdb)
+            .inspect_err(|e| debug!("Failed to load tip sortition snapshot: {e:?}"))?;
 
         let getblocksinv = GetBlocksInv {
             consensus_hash: ancestor_sn.consensus_hash,
@@ -2634,12 +2662,11 @@ impl PeerNetwork {
 
         let blocks_inv =
             ConversationP2P::make_getblocksinv_response(self, sortdb, chainstate, &getblocksinv)
-                .map_err(|e| {
+                .inspect_err(|e| {
                     debug!(
-                        "Failed to load blocks inventory at reward cycle {} ({:?}): {:?}",
-                        reward_cycle, &ancestor_sn.consensus_hash, &e
-                    );
-                    e
+                "Failed to load blocks inventory at reward cycle {reward_cycle} ({:?}): {e:?}",
+                &ancestor_sn.consensus_hash
+            );
                 })?;
 
         match blocks_inv {
@@ -2676,12 +2703,22 @@ impl PeerNetwork {
 
         // disconnect and ban broken peers
         for broken in broken_neighbors.into_iter() {
-            self.deregister_and_ban_neighbor(&broken);
+            //substantial changes to the epoch2x sync would be required to get further detail about why the connection was broken. Just use "Unknown" for now.
+            self.deregister_and_ban_neighbor(
+                &broken,
+                DropReason::BrokenConnection("Unknown".into()),
+                DropSource::Epoch2xInventorySync,
+            );
         }
 
         // disconnect from dead connections
         for dead in dead_neighbors.into_iter() {
-            self.deregister_neighbor(&dead);
+            //substantial changes to the epoch2x sync would be required to get further detail about why the connection is dead. Just use "Unknown" for now.
+            self.deregister_neighbor(
+                &dead,
+                DropReason::DeadConnection("Unknown".into()),
+                DropSource::Epoch2xInventorySync,
+            );
         }
 
         (done, throttled)
@@ -2716,8 +2753,8 @@ impl PeerNetwork {
         // only count an inv_sync as passing if there's an always-allowed node
         // in our inv state
         let always_allowed: HashSet<_> =
-            PeerDB::get_always_allowed_peers(&self.peerdb.conn(), self.local_peer.network_id)
-                .unwrap_or(vec![])
+            PeerDB::get_always_allowed_peers(self.peerdb.conn(), self.local_peer.network_id)
+                .unwrap_or_default()
                 .into_iter()
                 .map(|neighbor| neighbor.addr)
                 .collect();
@@ -2739,7 +2776,7 @@ impl PeerNetwork {
         };
 
         for (nk, stats) in inv_state.block_stats.iter() {
-            if self.is_bound(&nk) {
+            if self.is_bound(nk) {
                 // this is the same address we're bound to
                 continue;
             }
@@ -2747,7 +2784,7 @@ impl PeerNetwork {
                 // this is a peer at our address
                 continue;
             }
-            if !always_allowed.contains(&nk) {
+            if !always_allowed.contains(nk) {
                 // this peer isn't in the always-allowed set
                 continue;
             }
@@ -2786,7 +2823,7 @@ impl PeerNetwork {
     }
 
     /// Do an inventory state machine pass for epoch 2.x.
-    /// Returns the new work state  
+    /// Returns the new work state
     pub fn work_inv_sync_epoch2x(
         &mut self,
         sortdb: &SortitionDB,

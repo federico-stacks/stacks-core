@@ -21,7 +21,6 @@ use clarity::types::StacksEpochId;
 use clarity::util::sleep_ms;
 use libsigner::v0::messages::{MessageSlotID, SignerMessage};
 use libsigner::SignerSession;
-use slog::{slog_info, slog_warn};
 use stacks_common::{info, warn};
 
 use crate::cli::MonitorSignersArgs;
@@ -55,7 +54,7 @@ impl SignerMonitor {
     pub fn new(args: MonitorSignersArgs) -> Self {
         url::Url::parse(&format!("http://{}", args.host)).expect("Failed to parse node host");
         let stacks_client = StacksClient::try_from_host(
-            StacksPrivateKey::new(), // We don't need a private key to read
+            StacksPrivateKey::random(), // We don't need a private key to read
             args.host.clone(),
             "FOO".to_string(), // We don't care about authorized paths. Just accessing public info
         )

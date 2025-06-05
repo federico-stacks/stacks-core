@@ -98,7 +98,7 @@ impl BurnchainStateTransition {
 
     /// Get the transaction IDs of all accepted burnchain operations in this block
     pub fn txids(&self) -> Vec<Txid> {
-        self.accepted_ops.iter().map(|ref op| op.txid()).collect()
+        self.accepted_ops.iter().map(|op| op.txid()).collect()
     }
 
     /// Get the sum of all burnchain tokens spent in this burnchain block's accepted operations
@@ -136,7 +136,7 @@ impl BurnchainStateTransition {
             return Some(block_total_burns[0]);
         } else if block_total_burns.len() % 2 != 0 {
             let idx = block_total_burns.len() / 2;
-            return block_total_burns.get(idx).map(|b| *b);
+            return block_total_burns.get(idx).copied();
         } else {
             // NOTE: the `- 1` is safe because block_total_burns.len() >= 2
             let idx_left = block_total_burns.len() / 2 - 1;
@@ -196,7 +196,7 @@ impl BurnchainStateTransition {
 
         // find all VRF leader keys that were consumed by the block commits of this block
         let consumed_leader_keys =
-            sort_tx.get_consumed_leader_keys(&parent_snapshot, &block_commits)?;
+            sort_tx.get_consumed_leader_keys(parent_snapshot, &block_commits)?;
 
         // assemble the commit windows
         let mut windowed_block_commits = vec![block_commits];
@@ -269,8 +269,7 @@ impl BurnchainStateTransition {
                 let mut missed_commits_at_height =
                     SortitionDB::get_missed_commits_by_intended(sort_tx.tx(), &sortition_id)?;
                 if let Some(missed_commit_in_block) = missed_commits_map.remove(&sortition_id) {
-                    missed_commits_at_height
-                        .extend(missed_commit_in_block.into_iter().map(|x| x.clone()));
+                    missed_commits_at_height.extend(missed_commit_in_block.into_iter().cloned());
                 }
 
                 windowed_missed_commits.push(missed_commits_at_height);
@@ -293,7 +292,7 @@ impl BurnchainStateTransition {
             );
 
             assert_eq!(windowed_block_commits.len(), 1);
-            assert_eq!(windowed_missed_commits.len(), 0);
+            assert!(windowed_missed_commits.is_empty());
         }
 
         // reverse vecs so that windows are in ascending block height order
@@ -355,7 +354,7 @@ impl BurnchainStateTransition {
             );
         }
 
-        accepted_ops.sort_by(|ref a, ref b| a.vtxindex().partial_cmp(&b.vtxindex()).unwrap());
+        accepted_ops.sort_by(|a, b| a.vtxindex().partial_cmp(&b.vtxindex()).unwrap());
 
         Ok(BurnchainStateTransition {
             burn_dist,
@@ -425,7 +424,7 @@ impl BurnchainBlock {
             BurnchainBlock::Bitcoin(ref data) => data
                 .txs
                 .iter()
-                .map(|ref tx| BurnchainTransaction::Bitcoin((*tx).clone()))
+                .map(|tx| BurnchainTransaction::Bitcoin((*tx).clone()))
                 .collect(),
         }
     }
@@ -579,6 +578,15 @@ impl Burnchain {
             .nakamoto_first_block_of_cycle(self.first_block_height, reward_cycle)
     }
 
+    #[cfg(any(test, feature = "testing"))]
+    /// the last burn block that must be *signed* by the signer set of `reward_cycle`.
+    /// this is the modulo -1 block
+    pub fn nakamoto_last_block_of_cycle(&self, reward_cycle: u64) -> u64 {
+        self.nakamoto_first_block_of_cycle(reward_cycle)
+            + self.pox_constants.reward_cycle_length as u64
+            - 1
+    }
+
     /// What is the reward cycle for this block height?
     /// This considers the modulo 0 block to be in reward cycle `n`, even though
     ///  rewards for cycle `n` do not begin until modulo 1.
@@ -684,11 +692,12 @@ impl Burnchain {
 
         if headers_height == 0 || headers_height < self.first_block_height {
             debug!("Fetch initial headers");
-            indexer.sync_headers(headers_height, None).map_err(|e| {
-                error!("Failed to sync initial headers");
-                sleep_ms(100);
-                e
-            })?;
+            indexer
+                .sync_headers(headers_height, None)
+                .inspect_err(|_e| {
+                    error!("Failed to sync initial headers");
+                    sleep_ms(100);
+                })?;
         }
         Ok(())
     }
@@ -850,7 +859,7 @@ impl Burnchain {
             }
             x if x == Opcodes::TransferStx as u8 => {
                 let pre_stx_txid = TransferStxOp::get_sender_txid(burn_tx).ok()?;
-                let pre_stx_tx = match pre_stx_op_map.get(&pre_stx_txid) {
+                let pre_stx_tx = match pre_stx_op_map.get(pre_stx_txid) {
                     Some(tx_ref) => Some(BlockstackOperationType::PreStx(tx_ref.clone())),
                     None => burnchain_db.find_burnchain_op(indexer, pre_stx_txid),
                 };
@@ -879,7 +888,7 @@ impl Burnchain {
             }
             x if x == Opcodes::StackStx as u8 => {
                 let pre_stx_txid = StackStxOp::get_sender_txid(burn_tx).ok()?;
-                let pre_stx_tx = match pre_stx_op_map.get(&pre_stx_txid) {
+                let pre_stx_tx = match pre_stx_op_map.get(pre_stx_txid) {
                     Some(tx_ref) => Some(BlockstackOperationType::PreStx(tx_ref.clone())),
                     None => burnchain_db.find_burnchain_op(indexer, pre_stx_txid),
                 };
@@ -914,7 +923,7 @@ impl Burnchain {
             }
             x if x == Opcodes::DelegateStx as u8 => {
                 let pre_stx_txid = DelegateStxOp::get_sender_txid(burn_tx).ok()?;
-                let pre_stx_tx = match pre_stx_op_map.get(&pre_stx_txid) {
+                let pre_stx_tx = match pre_stx_op_map.get(pre_stx_txid) {
                     Some(tx_ref) => Some(BlockstackOperationType::PreStx(tx_ref.clone())),
                     None => burnchain_db.find_burnchain_op(indexer, pre_stx_txid),
                 };
@@ -943,7 +952,7 @@ impl Burnchain {
             }
             x if x == Opcodes::VoteForAggregateKey as u8 => {
                 let pre_stx_txid = VoteForAggregateKeyOp::get_sender_txid(burn_tx).ok()?;
-                let pre_stx_tx = match pre_stx_op_map.get(&pre_stx_txid) {
+                let pre_stx_tx = match pre_stx_op_map.get(pre_stx_txid) {
                     Some(tx_ref) => Some(BlockstackOperationType::PreStx(tx_ref.clone())),
                     None => burnchain_db.find_burnchain_op(indexer, pre_stx_txid),
                 };
@@ -1039,7 +1048,7 @@ impl Burnchain {
         );
 
         let _blockstack_txs =
-            burnchain_db.store_new_burnchain_block(burnchain, indexer, &block, epoch_id)?;
+            burnchain_db.store_new_burnchain_block(burnchain, indexer, block, epoch_id)?;
         Burnchain::process_affirmation_maps(
             burnchain,
             burnchain_db,
@@ -1111,7 +1120,7 @@ impl Burnchain {
         let blockstack_txs = burnchain_db.store_new_burnchain_block(
             burnchain,
             indexer,
-            &block,
+            block,
             cur_epoch.epoch_id,
         )?;
 
@@ -1138,13 +1147,9 @@ impl Burnchain {
         let headers_path = indexer.get_headers_path();
 
         // sanity check -- what is the height of our highest header
-        let headers_height = indexer.get_highest_header_height().map_err(|e| {
-            error!(
-                "Failed to read headers height from {}: {:?}",
-                headers_path, &e
-            );
-            e
-        })?;
+        let headers_height = indexer
+            .get_highest_header_height()
+            .inspect_err(|e| error!("Failed to read headers height from {headers_path}: {e:?}"))?;
 
         if headers_height == 0 {
             return Ok((0, false));
@@ -1153,16 +1158,12 @@ impl Burnchain {
         // did we encounter a reorg since last sync?  Find the highest common ancestor of the
         // remote bitcoin peer's chain state.
         // Note that this value is 0-indexed -- the smallest possible value it returns is 0.
-        let reorg_height = indexer.find_chain_reorg().map_err(|e| {
-            error!("Failed to check for reorgs from {}: {:?}", headers_path, &e);
-            e
-        })?;
+        let reorg_height = indexer
+            .find_chain_reorg()
+            .inspect_err(|e| error!("Failed to check for reorgs from {headers_path}: {e:?}"))?;
 
         if reorg_height < headers_height {
-            warn!(
-                "Burnchain reorg detected: highest common ancestor at height {}",
-                reorg_height
-            );
+            warn!("Burnchain reorg detected: highest common ancestor at height {reorg_height}");
             return Ok((reorg_height, true));
         } else {
             // no reorg
@@ -1771,5 +1772,175 @@ impl Burnchain {
         }
         update_burnchain_height(block_header.block_height as i64);
         Ok(block_header)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use regex::Regex;
+
+    use super::*;
+    use crate::burnchains::*;
+
+    #[test]
+    fn test_creation_by_new_for_bitcoin_mainnet() {
+        let burn_chain = Burnchain::new("workdir/path", "bitcoin", "mainnet");
+        assert!(burn_chain.is_ok());
+
+        let burn_chain = burn_chain.unwrap();
+        let first_block_hash =
+            BurnchainHeaderHash::from_hex(BITCOIN_MAINNET_FIRST_BLOCK_HASH).unwrap();
+        assert_eq!(PEER_VERSION_MAINNET, burn_chain.peer_version);
+        assert_eq!(BITCOIN_NETWORK_ID_MAINNET, burn_chain.network_id);
+        assert_eq!(BITCOIN_MAINNET_NAME, burn_chain.network_name);
+        assert_eq!("workdir/path", burn_chain.working_dir);
+        assert_eq!(24, burn_chain.consensus_hash_lifetime);
+        assert_eq!(7, burn_chain.stable_confirmations);
+        assert_eq!(
+            BITCOIN_MAINNET_FIRST_BLOCK_HEIGHT,
+            burn_chain.first_block_height
+        );
+        assert_eq!(first_block_hash, burn_chain.first_block_hash);
+        assert_eq!(
+            BITCOIN_MAINNET_FIRST_BLOCK_TIMESTAMP,
+            burn_chain.first_block_timestamp
+        );
+        assert_eq!(PoxConstants::mainnet_default(), burn_chain.pox_constants);
+        assert_eq!(
+            BITCOIN_MAINNET_INITIAL_REWARD_START_BLOCK,
+            burn_chain.initial_reward_start_block
+        );
+    }
+
+    #[test]
+    fn test_creation_by_new_for_bitcoin_testnet() {
+        let burn_chain = Burnchain::new("workdir/path", "bitcoin", "testnet");
+        assert!(burn_chain.is_ok());
+
+        let burn_chain = burn_chain.unwrap();
+        let first_block_hash =
+            BurnchainHeaderHash::from_hex(BITCOIN_TESTNET_FIRST_BLOCK_HASH).unwrap();
+        assert_eq!(PEER_VERSION_TESTNET, burn_chain.peer_version);
+        assert_eq!(BITCOIN_NETWORK_ID_TESTNET, burn_chain.network_id);
+        assert_eq!(BITCOIN_TESTNET_NAME, burn_chain.network_name);
+        assert_eq!("workdir/path", burn_chain.working_dir);
+        assert_eq!(24, burn_chain.consensus_hash_lifetime);
+        assert_eq!(7, burn_chain.stable_confirmations);
+        assert_eq!(
+            BITCOIN_TESTNET_FIRST_BLOCK_HEIGHT,
+            burn_chain.first_block_height
+        );
+        assert_eq!(first_block_hash, burn_chain.first_block_hash);
+        assert_eq!(
+            BITCOIN_TESTNET_FIRST_BLOCK_TIMESTAMP,
+            burn_chain.first_block_timestamp
+        );
+        assert_eq!(PoxConstants::testnet_default(), burn_chain.pox_constants);
+        assert_eq!(1_990_000, burn_chain.initial_reward_start_block);
+    }
+
+    #[test]
+    fn test_creation_by_new_for_bitcoin_regtest() {
+        let burn_chain = Burnchain::new("workdir/path", "bitcoin", "regtest");
+        assert!(burn_chain.is_ok());
+
+        let burn_chain = burn_chain.unwrap();
+        let first_block_hash =
+            BurnchainHeaderHash::from_hex(BITCOIN_REGTEST_FIRST_BLOCK_HASH).unwrap();
+        assert_eq!(PEER_VERSION_TESTNET, burn_chain.peer_version);
+        assert_eq!(BITCOIN_NETWORK_ID_REGTEST, burn_chain.network_id);
+        assert_eq!(BITCOIN_REGTEST_NAME, burn_chain.network_name);
+        assert_eq!("workdir/path", burn_chain.working_dir);
+        assert_eq!(24, burn_chain.consensus_hash_lifetime);
+        assert_eq!(1, burn_chain.stable_confirmations);
+        assert_eq!(
+            BITCOIN_REGTEST_FIRST_BLOCK_HEIGHT,
+            burn_chain.first_block_height
+        );
+        assert_eq!(first_block_hash, burn_chain.first_block_hash);
+        assert_eq!(
+            BITCOIN_REGTEST_FIRST_BLOCK_TIMESTAMP,
+            burn_chain.first_block_timestamp
+        );
+        assert_eq!(PoxConstants::regtest_default(), burn_chain.pox_constants);
+        assert_eq!(
+            BITCOIN_REGTEST_FIRST_BLOCK_HEIGHT,
+            burn_chain.initial_reward_start_block
+        );
+    }
+
+    #[test]
+    fn test_creation_by_new_failure() {
+        //case: wrong chain name
+        let burn_chain = Burnchain::new("workdir/path", "wrong_chain_name", "regtest");
+        assert!(burn_chain.is_err());
+        assert!(matches!(
+            burn_chain.unwrap_err(),
+            burnchain_error::UnsupportedBurnchain
+        ));
+
+        //case: wrong network name
+        let burn_chain = Burnchain::new("workdir/path", "bitcoin", "wrong_net_name");
+        assert!(burn_chain.is_err());
+        assert!(matches!(
+            burn_chain.unwrap_err(),
+            burnchain_error::UnsupportedBurnchain
+        ));
+
+        //case: wrong chain name + wrong network name
+        let burn_chain = Burnchain::new("workdir/path", "wrong_chain_name", "wrong_net_name");
+        assert!(burn_chain.is_err());
+        assert!(matches!(
+            burn_chain.unwrap_err(),
+            burnchain_error::UnsupportedBurnchain
+        ));
+    }
+
+    #[test]
+    fn test_creation_by_default_unittest() {
+        let first_block_height = 0;
+        let first_block_hash = BurnchainHeaderHash([0u8; 32]);
+        let burn_chain = Burnchain::default_unittest(first_block_height, &first_block_hash);
+
+        let workdir_re = Regex::new(r"^/tmp/stacks-node-tests/unit-tests-[0-9a-f]{32}$").unwrap();
+
+        assert_eq!(PEER_VERSION_MAINNET, burn_chain.peer_version);
+        assert_eq!(BITCOIN_NETWORK_ID_MAINNET, burn_chain.network_id);
+        assert_eq!(BITCOIN_MAINNET_NAME, burn_chain.network_name);
+        assert!(workdir_re.is_match(&burn_chain.working_dir));
+        assert_eq!(24, burn_chain.consensus_hash_lifetime);
+        assert_eq!(7, burn_chain.stable_confirmations);
+        assert_eq!(first_block_height, burn_chain.first_block_height);
+        assert_eq!(first_block_hash, burn_chain.first_block_hash);
+        assert_eq!(
+            BITCOIN_MAINNET_FIRST_BLOCK_TIMESTAMP,
+            burn_chain.first_block_timestamp
+        );
+        assert_eq!(PoxConstants::mainnet_default(), burn_chain.pox_constants);
+        assert_eq!(first_block_height, burn_chain.initial_reward_start_block);
+    }
+
+    #[test]
+    fn test_nakamoto_reward_cycle_boundaries() {
+        let first_block_height = 0;
+        let first_block_hash = BurnchainHeaderHash([0u8; 32]);
+        let burn_chain = Burnchain::default_unittest(first_block_height, &first_block_hash);
+
+        //making obvious the reward cycle length used
+        assert_eq!(2100, burn_chain.pox_constants.reward_cycle_length);
+
+        //Reward Cycle: 0
+        let rc = 0;
+        let rc_first_block = burn_chain.nakamoto_first_block_of_cycle(rc);
+        let rc_last_block = burn_chain.nakamoto_last_block_of_cycle(rc);
+        assert_eq!(0, rc_first_block);
+        assert_eq!(2099, rc_last_block);
+
+        //Reward Cycle: 1
+        let rc = 1;
+        let rc_first_block = burn_chain.nakamoto_first_block_of_cycle(rc);
+        let rc_last_block = burn_chain.nakamoto_last_block_of_cycle(rc);
+        assert_eq!(2100, rc_first_block);
+        assert_eq!(4199, rc_last_block);
     }
 }

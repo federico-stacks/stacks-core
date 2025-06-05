@@ -1,5 +1,6 @@
 use std::env;
 use std::path::PathBuf;
+use std::time::Instant;
 
 use clarity::vm::costs::ExecutionCost;
 use clarity::vm::types::{PrincipalData, StandardPrincipalData};
@@ -11,7 +12,6 @@ use stacks_common::types::chainstate::{
 };
 use stacks_common::util::hash::{to_hex, Hash160, Sha512Trunc256Sum};
 use stacks_common::util::vrf::VRFProof;
-use time::Instant;
 
 use crate::chainstate::burn::ConsensusHash;
 use crate::chainstate::stacks::db::{StacksEpochReceipt, StacksHeaderInfo};
@@ -83,7 +83,7 @@ fn make_dummy_transfer_tx(fee: u64) -> StacksTransactionReceipt {
         TransactionVersion::Mainnet,
         TransactionAuth::Standard(TransactionSpendingCondition::new_initial_sighash()),
         TransactionPayload::TokenTransfer(
-            PrincipalData::Standard(StandardPrincipalData(0, [0; 20])),
+            PrincipalData::Standard(StandardPrincipalData::new(0, [0; 20]).unwrap()),
             1,
             TokenTransferMemo([0; 34]),
         ),
@@ -103,7 +103,7 @@ fn make_dummy_cc_tx(fee: u64) -> StacksTransactionReceipt {
         TransactionVersion::Mainnet,
         TransactionAuth::Standard(TransactionSpendingCondition::new_initial_sighash()),
         TransactionPayload::ContractCall(TransactionContractCall {
-            address: StacksAddress::new(0, Hash160([0; 20])),
+            address: StacksAddress::new(0, Hash160([0; 20])).unwrap(),
             contract_name: "cc-dummy".into(),
             function_name: "func-name".into(),
             function_args: vec![],
@@ -116,6 +116,7 @@ fn make_dummy_cc_tx(fee: u64) -> StacksTransactionReceipt {
         Value::okay(Value::Bool(true)).unwrap(),
         0,
         ExecutionCost::ZERO,
+        None,
     )
 }
 

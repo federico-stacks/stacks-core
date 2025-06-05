@@ -17,6 +17,9 @@
 use std::collections::HashMap;
 
 use stacks_common::deps_common::bitcoin::network::serialize::BitcoinHash;
+use stacks_common::types::net::PeerAddress;
+use stacks_common::util::hash::Hash160;
+use stacks_common::util::secp256k1::{Secp256k1PrivateKey, Secp256k1PublicKey};
 
 use crate::burnchains::bitcoin::indexer::BitcoinIndexer;
 use crate::burnchains::db::BurnchainHeaderReader;
@@ -138,7 +141,7 @@ fn peerblocksinv_merge() {
     );
 
     // merge above, non-overlapping, aligned
-    let mut peer_inv_above = peer_inv.clone();
+    let mut peer_inv_above = peer_inv;
     let (new_blocks, new_microblocks) =
         peer_inv_above.merge_blocks_inv(12345 + 32, 16, vec![0x11, 0x22], vec![0x11, 0x22], false);
     assert_eq!(peer_inv_above.num_sortitions, 48);
@@ -306,7 +309,7 @@ fn peerblocksinv_merge_clear_bits() {
     );
 
     // merge above, non-overlapping, aligned
-    let mut peer_inv_above = peer_inv.clone();
+    let mut peer_inv_above = peer_inv;
     let (new_blocks, new_microblocks) =
         peer_inv_above.merge_blocks_inv(12345 + 32, 16, vec![0x11, 0x22], vec![0x11, 0x22], true);
     assert_eq!(peer_inv_above.num_sortitions, 48);
@@ -527,7 +530,7 @@ fn test_sync_inv_set_blocks_microblocks_available() {
     ]
     .iter_mut()
     {
-        let working_dir = get_burnchain(&test_path, None).working_dir;
+        let working_dir = get_burnchain(test_path, None).working_dir;
 
         // pre-populate headers
         let mut indexer = BitcoinIndexer::new_unit_test(&working_dir);
@@ -578,11 +581,11 @@ fn test_sync_inv_set_blocks_microblocks_available() {
         peer_2_config.burnchain.first_block_hash
     );
 
-    let burnchain = peer_1_config.burnchain.clone();
+    let burnchain = peer_1_config.burnchain;
 
     let num_blocks = 5;
     let first_stacks_block_height = {
-        let sn = SortitionDB::get_canonical_burn_chain_tip(&peer_1.sortdb.as_ref().unwrap().conn())
+        let sn = SortitionDB::get_canonical_burn_chain_tip(peer_1.sortdb.as_ref().unwrap().conn())
             .unwrap();
         sn.block_height
     };
@@ -752,7 +755,7 @@ fn test_sync_inv_make_inv_messages() {
     let mut peer_1 = TestPeer::new(peer_1_config);
 
     let first_stacks_block_height = {
-        let sn = SortitionDB::get_canonical_burn_chain_tip(&peer_1.sortdb.as_ref().unwrap().conn())
+        let sn = SortitionDB::get_canonical_burn_chain_tip(peer_1.sortdb.as_ref().unwrap().conn())
             .unwrap();
         sn.block_height
     };
@@ -801,7 +804,7 @@ fn test_sync_inv_make_inv_messages() {
         })
         .unwrap();
 
-    test_debug!("\n\nSend {:?}\n\n", &getpoxinv_request);
+    test_debug!("\n\nSend {getpoxinv_request:?}\n\n");
 
     let reply = peer_1
         .with_network_state(|sortdb, _chainstate, network, _relayer, _mempool| {
@@ -809,7 +812,7 @@ fn test_sync_inv_make_inv_messages() {
         })
         .unwrap();
 
-    test_debug!("\n\nReply {:?}\n\n", &reply);
+    test_debug!("\n\nReply {reply:?}\n\n");
 
     match reply {
         StacksMessageType::PoxInv(poxinv) => {
@@ -817,8 +820,7 @@ fn test_sync_inv_make_inv_messages() {
             assert_eq!(poxinv.pox_bitvec, vec![0x01]);
         }
         x => {
-            error!("Did not get PoxInv, but got {:?}", &x);
-            assert!(false);
+            panic!("Did not get PoxInv, but got {x:?}");
         }
     }
 
@@ -842,7 +844,7 @@ fn test_sync_inv_make_inv_messages() {
         })
         .unwrap();
 
-    test_debug!("\n\nSend {:?}\n\n", &getpoxinv_request);
+    test_debug!("\n\nSend {getpoxinv_request:?}\n\n");
 
     let reply = peer_1
         .with_network_state(|sortdb, _chainstate, network, _relayer, _mempool| {
@@ -850,7 +852,7 @@ fn test_sync_inv_make_inv_messages() {
         })
         .unwrap();
 
-    test_debug!("\n\nReply {:?}\n\n", &reply);
+    test_debug!("\n\nReply {reply:?}\n\n");
 
     match reply {
         StacksMessageType::PoxInv(poxinv) => {
@@ -858,8 +860,7 @@ fn test_sync_inv_make_inv_messages() {
             assert_eq!(poxinv.pox_bitvec, vec![0x7f]);
         }
         x => {
-            error!("Did not get PoxInv, but got {:?}", &x);
-            assert!(false);
+            panic!("Did not get PoxInv, but got {x:?}");
         }
     }
 
@@ -874,7 +875,7 @@ fn test_sync_inv_make_inv_messages() {
         })
         .unwrap();
 
-    test_debug!("\n\nSend {:?}\n\n", &getpoxinv_request);
+    test_debug!("\n\nSend {getpoxinv_request:?}\n\n");
 
     let reply = peer_1
         .with_network_state(|sortdb, _chainstate, network, _relayer, _mempool| {
@@ -882,15 +883,14 @@ fn test_sync_inv_make_inv_messages() {
         })
         .unwrap();
 
-    test_debug!("\n\nReply {:?}\n\n", &reply);
+    test_debug!("\n\nReply {reply:?}\n\n");
 
     match reply {
         StacksMessageType::Nack(nack_data) => {
             assert_eq!(nack_data.error_code, NackErrorCodes::InvalidPoxFork);
         }
         x => {
-            error!("Did not get PoxInv, but got {:?}", &x);
-            assert!(false);
+            panic!("Did not get PoxInv, but got {x:?}");
         }
     }
 
@@ -918,7 +918,7 @@ fn test_sync_inv_make_inv_messages() {
         })
         .unwrap();
 
-    test_debug!("\n\nSend {:?}\n\n", &getblocksinv_request);
+    test_debug!("\n\nSend {getblocksinv_request:?}\n\n");
 
     let reply = peer_1
         .with_network_state(|sortdb, chainstate, network, _relayer, _mempool| {
@@ -931,7 +931,7 @@ fn test_sync_inv_make_inv_messages() {
         })
         .unwrap();
 
-    test_debug!("\n\nReply {:?}\n\n", &reply);
+    test_debug!("\n\nReply {reply:?}\n\n");
 
     match reply {
         StacksMessageType::BlocksInv(blocksinv) => {
@@ -940,8 +940,7 @@ fn test_sync_inv_make_inv_messages() {
             assert_eq!(blocksinv.microblocks_bitvec, vec![0x1e]);
         }
         x => {
-            error!("Did not get BlocksInv, but got {:?}", &x);
-            assert!(false);
+            panic!("Did not get BlocksInv, but got {x:?}");
         }
     };
 
@@ -954,7 +953,7 @@ fn test_sync_inv_make_inv_messages() {
                     .block_height_to_reward_cycle(first_stacks_block_height)
                     .unwrap(),
             );
-            test_debug!("Ask for inv at height {}", height);
+            test_debug!("Ask for inv at height {height}");
             let sn = {
                 let ic = sortdb.index_conn();
                 let sn = SortitionDB::get_ancestor_snapshot(&ic, height, &tip.sortition_id)
@@ -970,7 +969,7 @@ fn test_sync_inv_make_inv_messages() {
         })
         .unwrap();
 
-    test_debug!("\n\nSend {:?}\n\n", &getblocksinv_request);
+    test_debug!("\n\nSend {getblocksinv_request:?}\n\n");
 
     let reply = peer_1
         .with_network_state(|sortdb, chainstate, network, _relayer, _mempool| {
@@ -983,7 +982,7 @@ fn test_sync_inv_make_inv_messages() {
         })
         .unwrap();
 
-    test_debug!("\n\nReply {:?}\n\n", &reply);
+    test_debug!("\n\nReply {reply:?}\n\n");
 
     match reply {
         StacksMessageType::BlocksInv(blocksinv) => {
@@ -992,8 +991,7 @@ fn test_sync_inv_make_inv_messages() {
             assert_eq!(blocksinv.microblocks_bitvec, vec![0x1e]);
         }
         x => {
-            error!("Did not get Nack, but got {:?}", &x);
-            assert!(false);
+            panic!("Did not get Nack, but got {x:?}");
         }
     };
 
@@ -1007,7 +1005,7 @@ fn test_sync_inv_make_inv_messages() {
                     .unwrap()
                     - 1,
             );
-            test_debug!("Ask for inv at height {}", height);
+            test_debug!("Ask for inv at height {height}");
             let sn = {
                 let ic = sortdb.index_conn();
                 let sn = SortitionDB::get_ancestor_snapshot(&ic, height, &tip.sortition_id)
@@ -1023,7 +1021,7 @@ fn test_sync_inv_make_inv_messages() {
         })
         .unwrap();
 
-    test_debug!("\n\nSend {:?}\n\n", &getblocksinv_request);
+    test_debug!("\n\nSend {getblocksinv_request:?}\n\n");
 
     let reply = peer_1
         .with_network_state(|sortdb, chainstate, network, _relayer, _mempool| {
@@ -1036,7 +1034,7 @@ fn test_sync_inv_make_inv_messages() {
         })
         .unwrap();
 
-    test_debug!("\n\nReply {:?}\n\n", &reply);
+    test_debug!("\n\nReply {reply:?}\n\n");
 
     match reply {
         StacksMessageType::BlocksInv(blocksinv) => {
@@ -1045,8 +1043,7 @@ fn test_sync_inv_make_inv_messages() {
             assert_eq!(blocksinv.microblocks_bitvec, vec![0x0]);
         }
         x => {
-            error!("Did not get BlocksInv, but got {:?}", &x);
-            assert!(false);
+            panic!("Did not get BlocksInv, but got {x:?}");
         }
     };
 
@@ -1074,7 +1071,7 @@ fn test_sync_inv_make_inv_messages() {
         })
         .unwrap();
 
-    test_debug!("\n\nSend {:?}\n\n", &getblocksinv_request);
+    test_debug!("\n\nSend {getblocksinv_request:?}\n\n");
 
     let reply = peer_1
         .with_network_state(|sortdb, chainstate, network, _relayer, _mempool| {
@@ -1087,15 +1084,14 @@ fn test_sync_inv_make_inv_messages() {
         })
         .unwrap();
 
-    test_debug!("\n\nReply {:?}\n\n", &reply);
+    test_debug!("\n\nReply {reply:?}\n\n");
 
     match reply {
         StacksMessageType::Nack(nack_data) => {
             assert_eq!(nack_data.error_code, NackErrorCodes::InvalidPoxFork);
         }
         x => {
-            error!("Did not get Nack, but got {:?}", &x);
-            assert!(false);
+            panic!("Did not get Nack, but got {x:?}");
         }
     };
 
@@ -1110,7 +1106,7 @@ fn test_sync_inv_make_inv_messages() {
         })
         .unwrap();
 
-    test_debug!("\n\nSend {:?}\n\n", &getblocksinv_request);
+    test_debug!("\n\nSend {getblocksinv_request:?}\n\n");
 
     let reply = peer_1
         .with_network_state(|sortdb, chainstate, network, _relayer, _mempool| {
@@ -1123,15 +1119,14 @@ fn test_sync_inv_make_inv_messages() {
         })
         .unwrap();
 
-    test_debug!("\n\nReply {:?}\n\n", &reply);
+    test_debug!("\n\nReply {reply:?}\n\n");
 
     match reply {
         StacksMessageType::Nack(nack_data) => {
             assert_eq!(nack_data.error_code, NackErrorCodes::NoSuchBurnchainBlock);
         }
         x => {
-            error!("Did not get Nack, but got {:?}", &x);
-            assert!(false);
+            panic!("Did not get Nack, but got {x:?}");
         }
     };
 }
@@ -1140,7 +1135,7 @@ fn test_sync_inv_make_inv_messages() {
 fn test_sync_inv_diagnose_nack() {
     let peer_config = TestPeerConfig::new(function_name!(), 0, 0);
     let neighbor = peer_config.to_neighbor();
-    let neighbor_key = neighbor.addr.clone();
+    let neighbor_key = neighbor.addr;
     let nack_no_block = NackData {
         error_code: NackErrorCodes::NoSuchBurnchainBlock,
     };
@@ -1230,7 +1225,7 @@ fn test_sync_inv_diagnose_nack() {
         NodeStatus::Diverged,
         NeighborBlockStats::diagnose_nack(
             &neighbor_key,
-            nack_no_block.clone(),
+            nack_no_block,
             &burnchain_view,
             12346,
             12340,
@@ -1343,7 +1338,7 @@ fn test_sync_inv_2_peers_plain() {
         let num_blocks = GETPOXINV_MAX_BITLEN * 2;
         let first_stacks_block_height = {
             let sn =
-                SortitionDB::get_canonical_burn_chain_tip(&peer_1.sortdb.as_ref().unwrap().conn())
+                SortitionDB::get_canonical_burn_chain_tip(peer_1.sortdb.as_ref().unwrap().conn())
                     .unwrap();
             sn.block_height + 1
         };
@@ -1390,22 +1385,16 @@ fn test_sync_inv_2_peers_plain() {
             };
 
             // nothing should break
-            match peer_1.network.inv_state {
-                Some(ref inv) => {
-                    assert_eq!(inv.get_broken_peers().len(), 0);
-                    assert_eq!(inv.get_dead_peers().len(), 0);
-                    assert_eq!(inv.get_diverged_peers().len(), 0);
-                }
-                None => {}
+            if let Some(ref inv) = peer_1.network.inv_state {
+                assert!(inv.get_broken_peers().is_empty());
+                assert!(inv.get_dead_peers().is_empty());
+                assert!(inv.get_diverged_peers().is_empty());
             }
 
-            match peer_2.network.inv_state {
-                Some(ref inv) => {
-                    assert_eq!(inv.get_broken_peers().len(), 0);
-                    assert_eq!(inv.get_dead_peers().len(), 0);
-                    assert_eq!(inv.get_diverged_peers().len(), 0);
-                }
-                None => {}
+            if let Some(ref inv) = peer_2.network.inv_state {
+                assert!(inv.get_broken_peers().is_empty());
+                assert!(inv.get_dead_peers().is_empty());
+                assert!(inv.get_diverged_peers().is_empty());
             }
 
             round += 1;
@@ -1520,7 +1509,7 @@ fn test_sync_inv_2_peers_stale() {
         let num_blocks = GETPOXINV_MAX_BITLEN * 2;
         let first_stacks_block_height = {
             let sn =
-                SortitionDB::get_canonical_burn_chain_tip(&peer_1.sortdb.as_ref().unwrap().conn())
+                SortitionDB::get_canonical_burn_chain_tip(peer_1.sortdb.as_ref().unwrap().conn())
                     .unwrap();
             sn.block_height + 1
         };
@@ -1553,46 +1542,38 @@ fn test_sync_inv_2_peers_stale() {
                 None => 0,
             };
 
-            match peer_1.network.inv_state {
-                Some(ref inv) => {
-                    info!("Peer 1 stats: {:?}", &inv.block_stats);
-                    assert_eq!(inv.get_broken_peers().len(), 0);
-                    assert_eq!(inv.get_dead_peers().len(), 0);
-                    assert_eq!(inv.get_diverged_peers().len(), 0);
+            if let Some(ref inv) = peer_1.network.inv_state {
+                info!("Peer 1 stats: {:?}", &inv.block_stats);
+                assert!(inv.get_broken_peers().is_empty());
+                assert!(inv.get_dead_peers().is_empty());
+                assert!(inv.get_diverged_peers().is_empty());
 
-                    if let Some(ref peer_2_inv) = inv.block_stats.get(&peer_2.to_neighbor().addr) {
-                        if peer_2_inv.inv.num_sortitions
-                            == first_stacks_block_height
-                                - peer_1.config.burnchain.first_block_height
-                        {
-                            for i in 0..first_stacks_block_height {
-                                assert!(!peer_2_inv.inv.has_ith_block(i));
-                                assert!(!peer_2_inv.inv.has_ith_microblock_stream(i));
-                            }
-                            peer_2_check = true;
+                if let Some(peer_2_inv) = inv.block_stats.get(&peer_2.to_neighbor().addr) {
+                    if peer_2_inv.inv.num_sortitions
+                        == first_stacks_block_height - peer_1.config.burnchain.first_block_height
+                    {
+                        for i in 0..first_stacks_block_height {
+                            assert!(!peer_2_inv.inv.has_ith_block(i));
+                            assert!(!peer_2_inv.inv.has_ith_microblock_stream(i));
                         }
+                        peer_2_check = true;
                     }
                 }
-                None => {}
             }
 
-            match peer_2.network.inv_state {
-                Some(ref inv) => {
-                    info!("Peer 2 stats: {:?}", &inv.block_stats);
-                    assert_eq!(inv.get_broken_peers().len(), 0);
-                    assert_eq!(inv.get_dead_peers().len(), 0);
-                    assert_eq!(inv.get_diverged_peers().len(), 0);
+            if let Some(ref inv) = peer_2.network.inv_state {
+                info!("Peer 2 stats: {:?}", &inv.block_stats);
+                assert!(inv.get_broken_peers().is_empty());
+                assert!(inv.get_dead_peers().is_empty());
+                assert!(inv.get_diverged_peers().is_empty());
 
-                    if let Some(ref peer_1_inv) = inv.block_stats.get(&peer_1.to_neighbor().addr) {
-                        if peer_1_inv.inv.num_sortitions
-                            == first_stacks_block_height
-                                - peer_1.config.burnchain.first_block_height
-                        {
-                            peer_1_check = true;
-                        }
+                if let Some(peer_1_inv) = inv.block_stats.get(&peer_1.to_neighbor().addr) {
+                    if peer_1_inv.inv.num_sortitions
+                        == first_stacks_block_height - peer_1.config.burnchain.first_block_height
+                    {
+                        peer_1_check = true;
                     }
                 }
-                None => {}
             }
 
             round += 1;
@@ -1629,7 +1610,7 @@ fn test_sync_inv_2_peers_unstable() {
 
         let first_stacks_block_height = {
             let sn =
-                SortitionDB::get_canonical_burn_chain_tip(&peer_1.sortdb.as_ref().unwrap().conn())
+                SortitionDB::get_canonical_burn_chain_tip(peer_1.sortdb.as_ref().unwrap().conn())
                     .unwrap();
             sn.block_height + 1
         };
@@ -1703,54 +1684,48 @@ fn test_sync_inv_2_peers_unstable() {
                 None => 0,
             };
 
-            match peer_1.network.inv_state {
-                Some(ref inv) => {
-                    info!("Peer 1 stats: {:?}", &inv.block_stats);
-                    assert_eq!(inv.get_broken_peers().len(), 0);
-                    assert_eq!(inv.get_dead_peers().len(), 0);
-                    assert_eq!(inv.get_diverged_peers().len(), 0);
+            if let Some(ref inv) = peer_1.network.inv_state {
+                info!("Peer 1 stats: {:?}", &inv.block_stats);
+                assert!(inv.get_broken_peers().is_empty());
+                assert!(inv.get_dead_peers().is_empty());
+                assert!(inv.get_diverged_peers().is_empty());
 
-                    if let Some(stats) = inv.get_stats(&peer_2.to_neighbor().addr) {
-                        if stats.target_pox_reward_cycle > 0 {
-                            peer_1_pox_cycle_start = true;
-                        }
-                        if stats.target_block_reward_cycle > 0 {
-                            peer_1_block_cycle_start = true;
-                        }
-                        if stats.target_pox_reward_cycle == 0 && peer_1_pox_cycle_start {
-                            peer_1_pox_cycle = true;
-                        }
-                        if stats.target_block_reward_cycle == 0 && peer_1_block_cycle_start {
-                            peer_1_block_cycle = true;
-                        }
+                if let Some(stats) = inv.get_stats(&peer_2.to_neighbor().addr) {
+                    if stats.target_pox_reward_cycle > 0 {
+                        peer_1_pox_cycle_start = true;
+                    }
+                    if stats.target_block_reward_cycle > 0 {
+                        peer_1_block_cycle_start = true;
+                    }
+                    if stats.target_pox_reward_cycle == 0 && peer_1_pox_cycle_start {
+                        peer_1_pox_cycle = true;
+                    }
+                    if stats.target_block_reward_cycle == 0 && peer_1_block_cycle_start {
+                        peer_1_block_cycle = true;
                     }
                 }
-                None => {}
             }
 
-            match peer_2.network.inv_state {
-                Some(ref inv) => {
-                    info!("Peer 2 stats: {:?}", &inv.block_stats);
-                    assert_eq!(inv.get_broken_peers().len(), 0);
-                    assert_eq!(inv.get_dead_peers().len(), 0);
-                    assert_eq!(inv.get_diverged_peers().len(), 0);
+            if let Some(ref inv) = peer_2.network.inv_state {
+                info!("Peer 2 stats: {:?}", &inv.block_stats);
+                assert!(inv.get_broken_peers().is_empty());
+                assert!(inv.get_dead_peers().is_empty());
+                assert!(inv.get_diverged_peers().is_empty());
 
-                    if let Some(stats) = inv.get_stats(&peer_1.to_neighbor().addr) {
-                        if stats.target_pox_reward_cycle > 0 {
-                            peer_2_pox_cycle_start = true;
-                        }
-                        if stats.target_block_reward_cycle > 0 {
-                            peer_2_block_cycle_start = true;
-                        }
-                        if stats.target_pox_reward_cycle == 0 && peer_2_pox_cycle_start {
-                            peer_2_pox_cycle = true;
-                        }
-                        if stats.target_block_reward_cycle == 0 && peer_2_block_cycle_start {
-                            peer_2_block_cycle = true;
-                        }
+                if let Some(stats) = inv.get_stats(&peer_1.to_neighbor().addr) {
+                    if stats.target_pox_reward_cycle > 0 {
+                        peer_2_pox_cycle_start = true;
+                    }
+                    if stats.target_block_reward_cycle > 0 {
+                        peer_2_block_cycle_start = true;
+                    }
+                    if stats.target_pox_reward_cycle == 0 && peer_2_pox_cycle_start {
+                        peer_2_pox_cycle = true;
+                    }
+                    if stats.target_block_reward_cycle == 0 && peer_2_block_cycle_start {
+                        peer_2_block_cycle = true;
                     }
                 }
-                None => {}
             }
 
             round += 1;
@@ -1842,7 +1817,7 @@ fn test_sync_inv_2_peers_different_pox_vectors() {
 
         let first_stacks_block_height = {
             let sn =
-                SortitionDB::get_canonical_burn_chain_tip(&peer_1.sortdb.as_ref().unwrap().conn())
+                SortitionDB::get_canonical_burn_chain_tip(peer_1.sortdb.as_ref().unwrap().conn())
                     .unwrap();
             sn.block_height + 1
         };
@@ -1917,42 +1892,30 @@ fn test_sync_inv_2_peers_different_pox_vectors() {
             let _ = peer_2.step();
 
             // peer 1 should see that peer 2 has all blocks for reward cycles 5 through 9
-            match peer_1.network.inv_state {
-                Some(ref inv) => {
-                    inv_1_count = inv.get_inv_num_blocks(&peer_2.to_neighbor().addr);
-                    peer_1_sorts = inv.get_inv_sortitions(&peer_2.to_neighbor().addr);
-                }
-                None => {}
+            if let Some(ref inv) = peer_1.network.inv_state {
+                inv_1_count = inv.get_inv_num_blocks(&peer_2.to_neighbor().addr);
+                peer_1_sorts = inv.get_inv_sortitions(&peer_2.to_neighbor().addr);
             };
 
             // peer 2 should see that peer 1 has all blocks up to where we stopped feeding them to
             // it
-            match peer_2.network.inv_state {
-                Some(ref inv) => {
-                    inv_2_count = inv.get_inv_num_blocks(&peer_1.to_neighbor().addr);
-                    peer_2_sorts = inv.get_inv_sortitions(&peer_1.to_neighbor().addr);
-                }
-                None => {}
+            if let Some(ref inv) = peer_2.network.inv_state {
+                inv_2_count = inv.get_inv_num_blocks(&peer_1.to_neighbor().addr);
+                peer_2_sorts = inv.get_inv_sortitions(&peer_1.to_neighbor().addr);
             };
 
-            match peer_1.network.inv_state {
-                Some(ref inv) => {
-                    info!("Peer 1 stats: {:?}", &inv.block_stats);
-                    assert_eq!(inv.get_broken_peers().len(), 0);
-                    assert_eq!(inv.get_dead_peers().len(), 0);
-                    assert_eq!(inv.get_diverged_peers().len(), 0);
-                }
-                None => {}
+            if let Some(ref inv) = peer_1.network.inv_state {
+                info!("Peer 1 stats: {:?}", &inv.block_stats);
+                assert!(inv.get_broken_peers().is_empty());
+                assert!(inv.get_dead_peers().is_empty());
+                assert!(inv.get_diverged_peers().is_empty());
             }
 
-            match peer_2.network.inv_state {
-                Some(ref inv) => {
-                    info!("Peer 2 stats: {:?}", &inv.block_stats);
-                    assert_eq!(inv.get_broken_peers().len(), 0);
-                    assert_eq!(inv.get_dead_peers().len(), 0);
-                    assert_eq!(inv.get_diverged_peers().len(), 0);
-                }
-                None => {}
+            if let Some(ref inv) = peer_2.network.inv_state {
+                info!("Peer 2 stats: {:?}", &inv.block_stats);
+                assert!(inv.get_broken_peers().is_empty());
+                assert!(inv.get_dead_peers().is_empty());
+                assert!(inv.get_diverged_peers().is_empty());
             }
 
             round += 1;
@@ -2053,4 +2016,232 @@ fn test_sync_inv_2_peers_different_pox_vectors() {
         assert!(!peer_2_inv.has_ith_block(num_blocks - 2 * reward_cycle_length));
         assert!(!peer_2_inv.has_ith_microblock_stream(num_blocks - 2 * reward_cycle_length));
     })
+}
+
+/// Helper function to create a test neighbor without binding to a port
+fn create_test_neighbor(port: u16) -> Neighbor {
+    let private_key = Secp256k1PrivateKey::random();
+    let public_key = Secp256k1PublicKey::from_private(&private_key);
+    let public_key_hash = Hash160::from_node_public_key(&public_key);
+
+    let neighbor_address = NeighborAddress {
+        addrbytes: PeerAddress::from_ipv4(127, 0, 0, 1),
+        port,
+        public_key_hash,
+    };
+
+    let neighbor_key = NeighborKey::from_neighbor_address(
+        0x18000000, // peer_version
+        0x80000000, // network_id
+        &neighbor_address,
+    );
+
+    Neighbor::empty(&neighbor_key, &public_key, 9999999)
+}
+
+/// Specification for a test peer
+struct TestPeerSpec {
+    port: u16,
+    status: NodeStatus,
+    num_sortitions: u64,
+}
+
+impl TestPeerSpec {
+    fn new(port: u16, status: NodeStatus, num_sortitions: u64) -> Self {
+        Self {
+            port,
+            status,
+            num_sortitions,
+        }
+    }
+}
+
+/// Helper function to setup multiple peers at once
+fn setup_test_inv_state(specs: &[TestPeerSpec]) -> (InvState, Vec<Neighbor>) {
+    // first_block_height=100, so heights = 100 + num_sortitions
+    let mut inv_state = InvState::new(100, 60, 3);
+    let mut neighbors = Vec::new();
+
+    for spec in specs {
+        let neighbor = create_test_neighbor(spec.port);
+        let neighbor_key = neighbor.addr.clone();
+
+        inv_state.add_peer(neighbor_key.clone(), false);
+        if let Some(stats) = inv_state.get_stats_mut(&neighbor_key) {
+            stats.status = spec.status;
+            stats.inv.num_sortitions = spec.num_sortitions;
+        }
+
+        neighbors.push(neighbor);
+    }
+
+    (inv_state, neighbors)
+}
+
+/// Helper function to create neighbors without adding them to inv_state
+fn create_test_neighbors(ports: &[u16]) -> Vec<Neighbor> {
+    ports
+        .iter()
+        .map(|&port| create_test_neighbor(port))
+        .collect()
+}
+
+/// Helper function to assert the expected heights for both IBD and non-IBD modes
+fn assert_max_heights(
+    inv_state: &InvState,
+    neighbors: &[Neighbor],
+    expected_non_ibd: Option<u64>,
+    expected_ibd: Option<u64>,
+) {
+    assert_eq!(
+        inv_state.get_max_stacks_height_of_neighbors(neighbors, false),
+        expected_non_ibd,
+        "Non-IBD mode assertion failed"
+    );
+    assert_eq!(
+        inv_state.get_max_stacks_height_of_neighbors(neighbors, true),
+        expected_ibd,
+        "IBD mode assertion failed"
+    );
+}
+
+#[test]
+fn test_get_max_stacks_height_of_neighbors() {
+    // Test empty neighbors list
+    let (inv_state, neighbors) = setup_test_inv_state(&[]);
+    assert_max_heights(&inv_state, &neighbors, None, None);
+}
+
+#[test]
+fn test_get_max_stacks_height_of_neighbors_no_stats() {
+    // Test neighbors without any stats in the inv_state
+    let inv_state = InvState::new(100, 60, 3);
+    let neighbors = create_test_neighbors(&[8080]);
+
+    // Should return None since no stats exist for the neighbor
+    assert_max_heights(&inv_state, &neighbors, None, None);
+}
+
+#[test]
+fn test_get_max_stacks_height_of_neighbors_single_online_peer() {
+    let (inv_state, neighbors) =
+        setup_test_inv_state(&[TestPeerSpec::new(8080, NodeStatus::Online, 150)]);
+
+    // Online peers should be accepted in both modes (height = 100 + 150 = 250)
+    assert_max_heights(&inv_state, &neighbors, Some(250), Some(250));
+}
+
+#[test]
+fn test_get_max_stacks_height_of_neighbors_single_diverged_peer() {
+    let (inv_state, neighbors) =
+        setup_test_inv_state(&[TestPeerSpec::new(8080, NodeStatus::Diverged, 200)]);
+
+    // Diverged peers accepted only in IBD mode (height = 100 + 200 = 300)
+    assert_max_heights(&inv_state, &neighbors, None, Some(300));
+}
+
+#[test]
+fn test_get_max_stacks_height_of_neighbors_single_broken_peer() {
+    let (inv_state, neighbors) =
+        setup_test_inv_state(&[TestPeerSpec::new(8080, NodeStatus::Broken, 180)]);
+
+    // Broken peers never accepted
+    assert_max_heights(&inv_state, &neighbors, None, None);
+}
+
+#[test]
+fn test_get_max_stacks_height_of_neighbors_single_stale_peer() {
+    let (inv_state, neighbors) =
+        setup_test_inv_state(&[TestPeerSpec::new(8080, NodeStatus::Stale, 120)]);
+
+    // Stale peers never accepted
+    assert_max_heights(&inv_state, &neighbors, None, None);
+}
+
+#[test]
+fn test_get_max_stacks_height_of_neighbors_single_dead_peer() {
+    let (inv_state, neighbors) =
+        setup_test_inv_state(&[TestPeerSpec::new(8080, NodeStatus::Dead, 190)]);
+
+    // Dead peers never accepted
+    assert_max_heights(&inv_state, &neighbors, None, None);
+}
+
+#[test]
+fn test_get_max_stacks_height_of_neighbors_multiple_online_peers() {
+    let specs = [
+        TestPeerSpec::new(8080, NodeStatus::Online, 100), // height = 200
+        TestPeerSpec::new(8081, NodeStatus::Online, 250), // height = 350 (max)
+        TestPeerSpec::new(8082, NodeStatus::Online, 180), // height = 280
+    ];
+
+    let (inv_state, neighbors) = setup_test_inv_state(&specs);
+
+    // Should return max height among all online peers (350)
+    assert_max_heights(&inv_state, &neighbors, Some(350), Some(350));
+}
+
+#[test]
+fn test_get_max_stacks_height_of_neighbors_mixed_statuses_non_ibd() {
+    let specs = [
+        TestPeerSpec::new(8080, NodeStatus::Online, 150), // height = 250
+        TestPeerSpec::new(8081, NodeStatus::Diverged, 300), // height = 400 (ignored in non-IBD)
+        TestPeerSpec::new(8082, NodeStatus::Online, 200), // height = 300 (max among Online)
+        TestPeerSpec::new(8083, NodeStatus::Broken, 350), // ignored
+    ];
+
+    let (inv_state, neighbors) = setup_test_inv_state(&specs);
+
+    // Non-IBD: only Online peers considered, max = 300
+    assert_max_heights(&inv_state, &neighbors, Some(300), Some(400));
+}
+
+#[test]
+fn test_get_max_stacks_height_of_neighbors_mixed_statuses_ibd() {
+    let specs = [
+        TestPeerSpec::new(8080, NodeStatus::Online, 150), // height = 250
+        TestPeerSpec::new(8081, NodeStatus::Diverged, 300), // height = 400 (max in IBD)
+        TestPeerSpec::new(8082, NodeStatus::Online, 200), // height = 300
+        TestPeerSpec::new(8083, NodeStatus::Broken, 350), // ignored even in IBD
+    ];
+
+    let (inv_state, neighbors) = setup_test_inv_state(&specs);
+
+    // IBD: both Online and Diverged considered, max = 400
+    assert_max_heights(&inv_state, &neighbors, Some(300), Some(400));
+}
+
+#[test]
+fn test_get_max_stacks_height_of_neighbors_minimum_height() {
+    let (inv_state, neighbors) =
+        setup_test_inv_state(&[TestPeerSpec::new(8080, NodeStatus::Online, 0)]);
+
+    // Should handle minimum height correctly (height = 100 + 0 = 100)
+    assert_max_heights(&inv_state, &neighbors, Some(100), Some(100));
+}
+
+#[test]
+fn test_get_max_stacks_height_of_neighbors_all_invalid_statuses() {
+    let specs = [
+        TestPeerSpec::new(8080, NodeStatus::Broken, 150),
+        TestPeerSpec::new(8081, NodeStatus::Dead, 200),
+    ];
+
+    let (inv_state, neighbors) = setup_test_inv_state(&specs);
+
+    // All invalid statuses should return None
+    assert_max_heights(&inv_state, &neighbors, None, None);
+}
+
+#[test]
+fn test_get_max_stacks_height_of_neighbors_diverged_only_non_ibd() {
+    let specs = [
+        TestPeerSpec::new(8080, NodeStatus::Diverged, 150), // height = 250
+        TestPeerSpec::new(8081, NodeStatus::Diverged, 200), // height = 300 (max)
+    ];
+
+    let (inv_state, neighbors) = setup_test_inv_state(&specs);
+
+    // Non-IBD: Diverged ignored, IBD: Diverged accepted
+    assert_max_heights(&inv_state, &neighbors, None, Some(300));
 }

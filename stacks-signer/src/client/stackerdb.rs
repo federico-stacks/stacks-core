@@ -16,15 +16,17 @@
 //
 use blockstack_lib::net::api::poststackerdbchunk::StackerDBErrorCodes;
 use clarity::codec::read_next;
+use clarity::types::chainstate::StacksPublicKey;
 use hashbrown::HashMap;
 use libsigner::{MessageSlotID, SignerMessage, SignerSession, StackerDBSession};
 use libstackerdb::{StackerDBChunkAckData, StackerDBChunkData};
-use slog::{slog_debug, slog_warn};
 use stacks_common::types::chainstate::StacksPrivateKey;
-use stacks_common::{debug, warn};
+use stacks_common::util::hash::to_hex;
+use stacks_common::{debug, info, warn};
 
 use crate::client::{retry_with_exponential_backoff, ClientError};
-use crate::config::SignerConfig;
+use crate::config::{SignerConfig, SignerConfigMode};
+use crate::signerdb::SignerDb;
 
 /// The signer StackerDB slot ID, purposefully wrapped to prevent conflation with SignerID
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Copy, PartialOrd, Ord)]
@@ -36,6 +38,12 @@ impl std::fmt::Display for SignerSlotID {
     }
 }
 
+#[derive(Debug)]
+enum StackerDBMode {
+    DryRun,
+    Normal { signer_slot_id: SignerSlotID },
+}
+
 /// The StackerDB client for communicating with the .signers contract
 #[derive(Debug)]
 pub struct StackerDB<M: MessageSlotID + std::cmp::Eq> {
@@ -44,34 +52,67 @@ pub struct StackerDB<M: MessageSlotID + std::cmp::Eq> {
     signers_message_stackerdb_sessions: HashMap<M, StackerDBSession>,
     /// The private key used in all stacks node communications
     stacks_private_key: StacksPrivateKey,
-    /// A map of a message ID to last chunk version for each session
-    slot_versions: HashMap<M, HashMap<SignerSlotID, u32>>,
-    /// The signer slot ID -- the index into the signer list for this signer daemon's signing key.
-    signer_slot_id: SignerSlotID,
+    /// The running mode of the stackerdb (whether the signer is running in dry-run or
+    ///  normal operation)
+    mode: StackerDBMode,
     /// The reward cycle of the connecting signer
     reward_cycle: u64,
+    /// signerdb connection
+    signer_db: SignerDb,
 }
 
 impl<M: MessageSlotID + 'static> From<&SignerConfig> for StackerDB<M> {
     fn from(config: &SignerConfig) -> Self {
+        let mode = match config.signer_mode {
+            SignerConfigMode::DryRun => StackerDBMode::DryRun,
+            SignerConfigMode::Normal {
+                ref signer_slot_id, ..
+            } => StackerDBMode::Normal {
+                signer_slot_id: *signer_slot_id,
+            },
+        };
+        let signer_db = SignerDb::new(&config.db_path).expect("Failed to connect to SignerDb");
+
         Self::new(
             &config.node_host,
             config.stacks_private_key,
             config.mainnet,
             config.reward_cycle,
-            config.signer_slot_id,
+            signer_db,
+            mode,
         )
     }
 }
 
 impl<M: MessageSlotID + 'static> StackerDB<M> {
-    /// Create a new StackerDB client
-    pub fn new(
+    #[cfg(any(test, feature = "testing"))]
+    /// Create a StackerDB client in normal operation (i.e., not a dry-run signer)
+    pub fn new_normal(
         host: &str,
         stacks_private_key: StacksPrivateKey,
         is_mainnet: bool,
         reward_cycle: u64,
         signer_slot_id: SignerSlotID,
+        signer_db: SignerDb,
+    ) -> Self {
+        Self::new(
+            host,
+            stacks_private_key,
+            is_mainnet,
+            reward_cycle,
+            signer_db,
+            StackerDBMode::Normal { signer_slot_id },
+        )
+    }
+
+    /// Create a new StackerDB client
+    fn new(
+        host: &str,
+        stacks_private_key: StacksPrivateKey,
+        is_mainnet: bool,
+        reward_cycle: u64,
+        signer_db: SignerDb,
+        signer_mode: StackerDBMode,
     ) -> Self {
         let mut signers_message_stackerdb_sessions = HashMap::new();
         for msg_id in M::all() {
@@ -83,9 +124,9 @@ impl<M: MessageSlotID + 'static> StackerDB<M> {
         Self {
             signers_message_stackerdb_sessions,
             stacks_private_key,
-            slot_versions: HashMap::new(),
-            signer_slot_id,
+            mode: signer_mode,
             reward_cycle,
+            signer_db,
         }
     }
 
@@ -110,28 +151,36 @@ impl<M: MessageSlotID + 'static> StackerDB<M> {
         msg_id: &M,
         message_bytes: Vec<u8>,
     ) -> Result<StackerDBChunkAckData, ClientError> {
-        let slot_id = self.signer_slot_id;
+        let StackerDBMode::Normal {
+            signer_slot_id: slot_id,
+        } = &self.mode
+        else {
+            info!(
+                "Dry-run signer would have sent a stackerdb message";
+                "message_id" => ?msg_id,
+                "message_bytes" => to_hex(&message_bytes)
+            );
+            return Ok(StackerDBChunkAckData {
+                accepted: true,
+                reason: None,
+                metadata: None,
+                code: None,
+            });
+        };
+        let signer_pk = StacksPublicKey::from_private(&self.stacks_private_key);
         loop {
-            let mut slot_version = if let Some(versions) = self.slot_versions.get_mut(msg_id) {
-                if let Some(version) = versions.get(&slot_id) {
-                    *version
-                } else {
-                    versions.insert(slot_id, 0);
-                    1
-                }
-            } else {
-                let mut versions = HashMap::new();
-                versions.insert(slot_id, 0);
-                self.slot_versions.insert(*msg_id, versions);
-                1
-            };
-
-            let mut chunk = StackerDBChunkData::new(slot_id.0, slot_version, message_bytes.clone());
-            chunk.sign(&self.stacks_private_key)?;
+            let slot_version = self
+                .signer_db
+                .get_latest_chunk_version(&signer_pk, slot_id.0)?
+                .map(|x| x.saturating_add(1))
+                .unwrap_or(0);
 
             let Some(session) = self.signers_message_stackerdb_sessions.get_mut(msg_id) else {
                 panic!("FATAL: would loop forever trying to send a message with ID {msg_id:?}, for which we don't have a session");
             };
+
+            let mut chunk = StackerDBChunkData::new(slot_id.0, slot_version, message_bytes.clone());
+            chunk.sign(&self.stacks_private_key)?;
 
             debug!(
                 "Sending a chunk to stackerdb slot ID {slot_id} with version {slot_version} and message ID {msg_id:?} to contract {:?}!\n{chunk:?}",
@@ -141,15 +190,10 @@ impl<M: MessageSlotID + 'static> StackerDB<M> {
             let send_request = || session.put_chunk(&chunk).map_err(backoff::Error::transient);
             let chunk_ack: StackerDBChunkAckData = retry_with_exponential_backoff(send_request)?;
 
-            if let Some(versions) = self.slot_versions.get_mut(msg_id) {
-                // NOTE: per the above, this is always executed
-                versions.insert(slot_id, slot_version.saturating_add(1));
-            } else {
-                return Err(ClientError::NotConnected);
-            }
-
             if chunk_ack.accepted {
                 debug!("Chunk accepted by stackerdb: {chunk_ack:?}");
+                self.signer_db
+                    .set_latest_chunk_version(&signer_pk, slot_id.0, slot_version)?;
                 return Ok(chunk_ack);
             } else {
                 warn!("Chunk rejected by stackerdb: {chunk_ack:?}");
@@ -159,15 +203,18 @@ impl<M: MessageSlotID + 'static> StackerDB<M> {
                     Some(StackerDBErrorCodes::DataAlreadyExists) => {
                         if let Some(slot_metadata) = chunk_ack.metadata {
                             warn!("Failed to send message to stackerdb due to wrong version number. Attempted {}. Expected {}. Retrying...", slot_version, slot_metadata.slot_version);
-                            slot_version = slot_metadata.slot_version;
+                            self.signer_db.set_latest_chunk_version(
+                                &signer_pk,
+                                slot_id.0,
+                                slot_metadata.slot_version,
+                            )?;
                         } else {
                             warn!("Failed to send message to stackerdb due to wrong version number. Attempted {}. Expected unknown version number. Incrementing and retrying...", slot_version);
-                        }
-                        if let Some(versions) = self.slot_versions.get_mut(msg_id) {
-                            // NOTE: per the above, this is always executed
-                            versions.insert(slot_id, slot_version.saturating_add(1));
-                        } else {
-                            return Err(ClientError::NotConnected);
+                            self.signer_db.set_latest_chunk_version(
+                                &signer_pk,
+                                slot_id.0,
+                                slot_version,
+                            )?;
                         }
                     }
                     _ => {
@@ -216,11 +263,6 @@ impl<M: MessageSlotID + 'static> StackerDB<M> {
         u32::try_from(self.reward_cycle % 2).expect("FATAL: reward cycle % 2 exceeds u32::MAX")
     }
 
-    /// Retrieve the signer slot ID
-    pub fn get_signer_slot_id(&self) -> SignerSlotID {
-        self.signer_slot_id
-    }
-
     /// Get the session corresponding to the given message ID if it exists
     pub fn get_session_mut(&mut self, msg_id: &M) -> Option<&mut StackerDBSession> {
         self.signers_message_stackerdb_sessions.get_mut(msg_id)
@@ -236,7 +278,7 @@ mod tests {
     use clarity::util::hash::{MerkleTree, Sha512Trunc256Sum};
     use clarity::util::secp256k1::MessageSignature;
     use libsigner::v0::messages::{
-        BlockRejection, BlockResponse, BlockResponseData, RejectCode, SignerMessage,
+        BlockRejection, BlockResponse, BlockResponseData, RejectCode, RejectReason, SignerMessage,
         SignerMessageMetadata,
     };
     use rand::{thread_rng, RngCore};
@@ -248,7 +290,7 @@ mod tests {
     #[test]
     fn send_signer_message_should_succeed() {
         let signer_config = build_signer_config_tomls(
-            &[StacksPrivateKey::new()],
+            &[StacksPrivateKey::random()],
             "localhost:20443",
             Some(Duration::from_millis(128)), // Timeout defaults to 5 seconds. Let's override it to 128 milliseconds.
             &Network::Testnet,
@@ -287,7 +329,10 @@ mod tests {
             chain_id: thread_rng().next_u32(),
             signature: MessageSignature::empty(),
             metadata: SignerMessageMetadata::empty(),
-            response_data: BlockResponseData::new(thread_rng().next_u64()),
+            response_data: BlockResponseData::new(
+                thread_rng().next_u64(),
+                RejectReason::RejectedInPriorRound,
+            ),
         };
         let signer_message = SignerMessage::BlockResponse(BlockResponse::Rejected(block_reject));
         let ack = StackerDBChunkAckData {

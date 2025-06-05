@@ -13,27 +13,32 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
+use std::collections::BTreeMap;
+use std::ops::Bound::Included;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
 
 use libsigner::v0::messages::{MinerSlotID, SignerMessage as SignerMessageV0};
-use libsigner::{BlockProposal, SignerSession, StackerDBSession};
+use libsigner::v0::signer_state::SignerStateMachine;
+use libsigner::{BlockProposal, BlockProposalData, SignerSession, StackerDBSession};
 use stacks::burnchains::Burnchain;
 use stacks::chainstate::burn::db::sortdb::SortitionDB;
 use stacks::chainstate::burn::{BlockSnapshot, ConsensusHash};
 use stacks::chainstate::nakamoto::{NakamotoBlock, NakamotoChainState};
 use stacks::chainstate::stacks::boot::{RewardSet, MINERS_NAME};
-use stacks::chainstate::stacks::db::StacksChainState;
+use stacks::chainstate::stacks::db::{StacksBlockHeaderTypes, StacksChainState};
 use stacks::chainstate::stacks::Error as ChainstateError;
 use stacks::codec::StacksMessageCodec;
 use stacks::libstackerdb::StackerDBChunkData;
 use stacks::net::stackerdb::StackerDBs;
-use stacks::types::chainstate::{StacksBlockId, StacksPrivateKey};
+use stacks::types::chainstate::{StacksBlockId, StacksPrivateKey, StacksPublicKey};
 use stacks::util::hash::Sha512Trunc256Sum;
 use stacks::util::secp256k1::MessageSignature;
 use stacks::util_lib::boot::boot_code_id;
 
+use super::miner_db::MinerDB;
 use super::stackerdb_listener::StackerDBListenerComms;
 use super::Error as NakamotoNodeError;
 use crate::event_dispatcher::StackerDBChannel;
@@ -66,6 +71,8 @@ pub struct SignerCoordinator {
     /// Rather, this burn block is used to determine whether or not a new
     ///  burn block has arrived since this thread started.
     burn_tip_at_start: ConsensusHash,
+    /// The timeout configuration based on the percentage of rejections
+    block_rejection_timeout_steps: BTreeMap<u32, Duration>,
 }
 
 impl SignerCoordinator {
@@ -87,11 +94,12 @@ impl SignerCoordinator {
         // Create the stacker DB listener
         let mut listener = StackerDBListener::new(
             stackerdb_channel,
-            node_keep_running.clone(),
+            node_keep_running,
             keep_running.clone(),
             reward_set,
             election_block,
             burnchain,
+            config,
         )?;
         let is_mainnet = config.is_mainnet();
         let rpc_socket = config
@@ -100,6 +108,14 @@ impl SignerCoordinator {
             .ok_or_else(|| ChainstateError::MinerAborted)?;
         let miners_contract_id = boot_code_id(MINERS_NAME, is_mainnet);
         let miners_session = StackerDBSession::new(&rpc_socket.to_string(), miners_contract_id);
+
+        // build a BTreeMap of the various timeout steps
+        let mut block_rejection_timeout_steps = BTreeMap::<u32, Duration>::new();
+        for (percentage, duration) in config.miner.block_rejection_timeout_steps.iter() {
+            let rejections_amount =
+                ((f64::from(listener.total_weight) / 100.0) * f64::from(*percentage)) as u32;
+            block_rejection_timeout_steps.insert(rejections_amount, *duration);
+        }
 
         let mut sc = Self {
             message_key,
@@ -111,6 +127,7 @@ impl SignerCoordinator {
             keep_running,
             listener_thread: None,
             burn_tip_at_start: burn_tip_at_start.clone(),
+            block_rejection_timeout_steps,
         };
 
         // Spawn the signer DB listener thread
@@ -146,6 +163,7 @@ impl SignerCoordinator {
         is_mainnet: bool,
         miners_session: &mut StackerDBSession,
         election_sortition: &ConsensusHash,
+        miner_db: &MinerDB,
     ) -> Result<(), NakamotoNodeError> {
         let Some(slot_range) = NakamotoChainState::get_miner_slot(sortdb, tip, election_sortition)
             .map_err(|e| {
@@ -171,7 +189,7 @@ impl SignerCoordinator {
         // Add 1 to get the NEXT version number
         // Note: we already check above for the slot's existence
         let miners_contract_id = boot_code_id(MINERS_NAME, is_mainnet);
-        let slot_version = stackerdbs
+        let mut slot_version = stackerdbs
             .get_slot_version(&miners_contract_id, slot_id)
             .map_err(|e| {
                 NakamotoNodeError::SigningCoordinatorFailure(format!(
@@ -180,6 +198,13 @@ impl SignerCoordinator {
             })?
             .unwrap_or(0)
             .saturating_add(1);
+        let miner_pk = StacksPublicKey::from_private(miner_sk);
+        if let Some(prior_version) = miner_db.get_latest_chunk_version(&miner_pk, slot_id)? {
+            if slot_version <= prior_version {
+                slot_version = prior_version.saturating_add(1);
+            }
+        }
+
         let mut chunk = StackerDBChunkData::new(slot_id, slot_version, message.serialize_to_vec());
         chunk.sign(miner_sk).map_err(|e| {
             NakamotoNodeError::SigningCoordinatorFailure(format!(
@@ -190,6 +215,7 @@ impl SignerCoordinator {
         match miners_session.put_chunk(&chunk) {
             Ok(ack) => {
                 if ack.accepted {
+                    miner_db.set_latest_chunk_version(&miner_pk, slot_id, slot_version)?;
                     debug!("Wrote message to stackerdb: {ack:?}");
                     Ok(())
                 } else {
@@ -224,6 +250,7 @@ impl SignerCoordinator {
         stackerdbs: &StackerDBs,
         counters: &Counters,
         election_sortition: &BlockSnapshot,
+        miner_db: &MinerDB,
     ) -> Result<Vec<MessageSignature>, NakamotoNodeError> {
         // Add this block to the block status map.
         self.stackerdb_comms.insert_block(&block.header);
@@ -236,48 +263,62 @@ impl SignerCoordinator {
             block: block.clone(),
             burn_height: election_sortition.block_height,
             reward_cycle: reward_cycle_id,
+            block_proposal_data: BlockProposalData::from_current_version(),
         };
 
         let block_proposal_message = SignerMessageV0::BlockProposal(block_proposal);
-        debug!("Sending block proposal message to signers";
-            "signer_signature_hash" => %block.header.signer_signature_hash(),
-        );
-        Self::send_miners_message::<SignerMessageV0>(
-            &self.message_key,
-            sortdb,
-            election_sortition,
-            stackerdbs,
-            block_proposal_message,
-            MinerSlotID::BlockProposal,
-            self.is_mainnet,
-            &mut self.miners_session,
-            &election_sortition.consensus_hash,
-        )?;
-        counters.bump_naka_proposed_blocks();
 
-        #[cfg(test)]
-        {
-            info!(
+        loop {
+            debug!("Sending block proposal message to signers";
+                "signer_signature_hash" => %block.header.signer_signature_hash(),
+            );
+            Self::send_miners_message::<SignerMessageV0>(
+                &self.message_key,
+                sortdb,
+                election_sortition,
+                stackerdbs,
+                block_proposal_message.clone(),
+                MinerSlotID::BlockProposal,
+                self.is_mainnet,
+                &mut self.miners_session,
+                &election_sortition.consensus_hash,
+                miner_db,
+            )?;
+            counters.bump_naka_proposed_blocks();
+
+            #[cfg(test)]
+            {
+                info!(
                 "SignerCoordinator: sent block proposal to .miners, waiting for test signing channel"
             );
-            // In test mode, short-circuit waiting for the signers if the TEST_SIGNING
-            //  channel has been created. This allows integration tests for the stacks-node
-            //  independent of the stacks-signer.
-            if let Some(signatures) =
-                crate::tests::nakamoto_integrations::TestSigningChannel::get_signature()
-            {
-                debug!("Short-circuiting waiting for signers, using test signature");
-                return Ok(signatures);
+                // In test mode, short-circuit waiting for the signers if the TEST_SIGNING
+                //  channel has been created. This allows integration tests for the stacks-node
+                //  independent of the stacks-signer.
+                if let Some(signatures) =
+                    crate::tests::nakamoto_integrations::TestSigningChannel::get_signature()
+                {
+                    debug!("Short-circuiting waiting for signers, using test signature");
+                    return Ok(signatures);
+                }
+            }
+
+            let res = self.get_block_status(
+                &block.header.signer_signature_hash(),
+                &block.block_id(),
+                block.header.parent_block_id,
+                chain_state,
+                sortdb,
+                counters,
+            );
+
+            match res {
+                Err(NakamotoNodeError::SignatureTimeout) => {
+                    info!("Block proposal signing process timed out, resending the same proposal");
+                    continue;
+                }
+                _ => return res,
             }
         }
-
-        self.get_block_status(
-            &block.header.signer_signature_hash(),
-            &block.block_id(),
-            chain_state,
-            sortdb,
-            counters,
-        )
     }
 
     /// Get the block status for a given block hash.
@@ -289,20 +330,47 @@ impl SignerCoordinator {
         &self,
         block_signer_sighash: &Sha512Trunc256Sum,
         block_id: &StacksBlockId,
+        parent_block_id: StacksBlockId,
         chain_state: &mut StacksChainState,
         sortdb: &SortitionDB,
         counters: &Counters,
     ) -> Result<Vec<MessageSignature>, NakamotoNodeError> {
+        // the amount of current rejections (used to eventually modify the timeout)
+        let mut rejections: u32 = 0;
+        // default timeout (the 0 entry must be always present)
+        let mut rejections_timeout = self
+            .block_rejection_timeout_steps
+            .get(&rejections)
+            .ok_or_else(|| {
+                NakamotoNodeError::SigningCoordinatorFailure(
+                    "Invalid rejection timeout step function definition".into(),
+                )
+            })?;
+
+        let parent_tenure_header =
+            NakamotoChainState::get_block_header(chain_state.db(), &parent_block_id)?
+                .ok_or(NakamotoNodeError::UnexpectedChainState)?;
+
+        // this is used to track the start of the waiting cycle
+        let rejections_timer = Instant::now();
         loop {
+            // At every iteration wait for the block_status.
+            // Exit when the amount of confirmations/rejections reaches the threshold (or until timeout)
+            // Based on the amount of rejections, eventually modify the timeout.
             let block_status = match self.stackerdb_comms.wait_for_block_status(
                 block_signer_sighash,
                 EVENT_RECEIVER_POLL,
                 |status| {
-                    status.total_weight_signed < self.weight_threshold
-                        && status
-                            .total_reject_weight
-                            .saturating_add(self.weight_threshold)
-                            <= self.total_weight
+                    // rejections-based timeout expired?
+                    if rejections_timer.elapsed() > *rejections_timeout {
+                        return false;
+                    }
+                    // number of rejections changed?
+                    if status.total_weight_rejected != rejections {
+                        return false;
+                    }
+                    // enough signatures?
+                    return status.total_weight_approved < self.weight_threshold;
                 },
             )? {
                 Some(status) => status,
@@ -310,7 +378,7 @@ impl SignerCoordinator {
                     // If we just received a timeout, we should check if the burnchain
                     // tip has changed or if we received this signed block already in
                     // the staging db.
-                    debug!("SignerCoordinator: Timeout waiting for block signatures");
+                    debug!("SignerCoordinator: Intermediate timeout waiting for block status");
 
                     // Look in the nakamoto staging db -- a block can only get stored there
                     // if it has enough signing weight to clear the threshold.
@@ -321,7 +389,7 @@ impl SignerCoordinator {
                             warn!(
                                 "Failed to query chainstate for block: {e:?}";
                                 "block_id" => %block_id,
-                                "block_signer_sighash" => %block_signer_sighash,
+                                "signer_signature_hash" => %block_signer_sighash,
                             );
                             e
                         })
@@ -336,31 +404,99 @@ impl SignerCoordinator {
                         return Err(NakamotoNodeError::BurnchainTipChanged);
                     }
 
+                    if rejections_timer.elapsed() > *rejections_timeout {
+                        warn!("Timed out while waiting for responses from signers, resending proposal";
+                            "elapsed" => rejections_timer.elapsed().as_secs(),
+                            "rejections_timeout" => rejections_timeout.as_secs(),
+                            "rejections" => rejections,
+                            "rejections_threshold" => self.total_weight.saturating_sub(self.weight_threshold)
+                        );
+
+                        // Reset the rejections in the stackerdb listener
+                        self.stackerdb_comms.reset_rejections(block_signer_sighash);
+
+                        return Err(NakamotoNodeError::SignatureTimeout);
+                    }
+
+                    // Check if a new Stacks block has arrived in the parent tenure
+                    let highest_in_tenure =
+                        NakamotoChainState::get_highest_known_block_header_in_tenure(
+                            &mut chain_state.index_conn(),
+                            &parent_tenure_header.consensus_hash,
+                        )?
+                        .ok_or(NakamotoNodeError::UnexpectedChainState)?;
+                    let highest_stacks_block_id = highest_in_tenure.index_block_hash();
+                    if &highest_stacks_block_id == block_id {
+                        // the block was included in the chainstate since we last checked!
+                        let StacksBlockHeaderTypes::Nakamoto(stored_block) =
+                            highest_in_tenure.anchored_header
+                        else {
+                            error!("Nakamoto miner produced a non-nakamoto block");
+                            return Err(NakamotoNodeError::UnexpectedChainState);
+                        };
+                        return Ok(stored_block.signer_signature);
+                    } else if highest_stacks_block_id != parent_block_id {
+                        info!("SignCoordinator: Exiting due to new stacks tip");
+                        return Err(NakamotoNodeError::StacksTipChanged);
+                    }
+
                     continue;
                 }
             };
 
+            if rejections != block_status.total_weight_rejected {
+                rejections = block_status.total_weight_rejected;
+                let (rejections_step, new_rejections_timeout) = self
+                    .block_rejection_timeout_steps
+                    .range((Included(0), Included(rejections)))
+                    .last()
+                    .ok_or_else(|| {
+                        NakamotoNodeError::SigningCoordinatorFailure(
+                            "Invalid rejection timeout step function definition".into(),
+                        )
+                    })?;
+                rejections_timeout = new_rejections_timeout;
+                info!("Number of received rejections updated, resetting timeout";
+                                    "rejections" => rejections,
+                                    "rejections_timeout" => rejections_timeout.as_secs(),
+                                    "rejections_step" => rejections_step,
+                                    "rejections_threshold" => self.total_weight.saturating_sub(self.weight_threshold));
+
+                counters.set_miner_current_rejections_timeout_secs(rejections_timeout.as_secs());
+                counters.set_miner_current_rejections(rejections);
+            }
+
             if block_status
-                .total_reject_weight
+                .total_weight_rejected
                 .saturating_add(self.weight_threshold)
                 > self.total_weight
             {
                 info!(
                     "{}/{} signers vote to reject block",
-                    block_status.total_reject_weight, self.total_weight;
-                    "block_signer_sighash" => %block_signer_sighash,
+                    block_status.total_weight_rejected, self.total_weight;
+                    "signer_signature_hash" => %block_signer_sighash,
                 );
                 counters.bump_naka_rejected_blocks();
                 return Err(NakamotoNodeError::SignersRejected);
-            } else if block_status.total_weight_signed >= self.weight_threshold {
+            } else if block_status.total_weight_approved >= self.weight_threshold {
                 info!("Received enough signatures, block accepted";
-                    "block_signer_sighash" => %block_signer_sighash,
+                    "signer_signature_hash" => %block_signer_sighash,
                 );
                 return Ok(block_status.gathered_signatures.values().cloned().collect());
+            } else if rejections_timer.elapsed() > *rejections_timeout {
+                warn!("Timed out while waiting for responses from signers";
+                    "elapsed" => rejections_timer.elapsed().as_secs(),
+                    "rejections_timeout" => rejections_timeout.as_secs(),
+                    "rejections" => rejections,
+                    "rejections_threshold" => self.total_weight.saturating_sub(self.weight_threshold)
+                );
+
+                // Reset the rejections in the stackerdb listener
+                self.stackerdb_comms.reset_rejections(block_signer_sighash);
+
+                return Err(NakamotoNodeError::SignatureTimeout);
             } else {
-                return Err(NakamotoNodeError::SigningCoordinatorFailure(
-                    "Unblocked without reaching the threshold".into(),
-                ));
+                continue;
             }
         }
     }
@@ -370,6 +506,11 @@ impl SignerCoordinator {
     pub fn get_tenure_extend_timestamp(&self) -> u64 {
         self.stackerdb_comms
             .get_tenure_extend_timestamp(self.weight_threshold)
+    }
+
+    /// Get the signer global state view if there is one
+    pub fn get_signer_global_state(&self) -> Option<SignerStateMachine> {
+        self.stackerdb_comms.get_signer_global_state()
     }
 
     /// Check if the tenure needs to change

@@ -20,17 +20,19 @@ use std::time::Duration;
 use clarity::codec::StacksMessageCodec;
 use hashbrown::HashMap;
 use libsigner::{SignerEntries, SignerEvent, SignerRunLoop};
-use slog::{slog_debug, slog_error, slog_info, slog_warn};
 use stacks_common::{debug, error, info, warn};
 
 use crate::chainstate::SortitionsView;
 use crate::client::{retry_with_exponential_backoff, ClientError, StacksClient};
-use crate::config::{GlobalConfig, SignerConfig};
+use crate::config::{GlobalConfig, SignerConfig, SignerConfigMode};
+use crate::signerdb::BlockInfo;
+use crate::v0::signer_state::LocalStateMachine;
 #[cfg(any(test, feature = "testing"))]
 use crate::v0::tests::TEST_SKIP_SIGNER_CLEANUP;
 use crate::Signer as SignerTrait;
 
 #[derive(thiserror::Error, Debug)]
+#[allow(clippy::large_enum_variant)]
 /// Configuration error type
 pub enum ConfigurationError {
     /// Error occurred while fetching data from the stacks node
@@ -39,6 +41,9 @@ pub enum ConfigurationError {
     /// The stackerdb signer config is not yet updated
     #[error("The stackerdb config is not yet updated")]
     StackerDBNotUpdated,
+    /// The signer binary is configured as dry-run, but is also registered for this cycle
+    #[error("The signer binary is configured as dry-run, but is also registered for this cycle")]
+    DryRunStackerIsRegistered,
 }
 
 /// The internal signer state info
@@ -50,6 +55,14 @@ pub struct StateInfo {
     pub reward_cycle_info: Option<RewardCycleInfo>,
     /// The current running signers reward cycles
     pub running_signers: Vec<u64>,
+    /// The local state machines for the running signers
+    ///  as a pair of (reward-cycle, state-machine)
+    pub signer_state_machines: Vec<(u64, Option<LocalStateMachine>)>,
+    /// The number of pending block proposals for this signer
+    pub pending_proposals_count: u64,
+    /// The canonical tip block info according to the running signers
+    /// as a pair of (reward-cycle, block-info)
+    pub signer_canonical_tips: Vec<(u64, Option<BlockInfo>)>,
 }
 
 /// The signer result that can be sent across threads
@@ -258,27 +271,48 @@ impl<Signer: SignerTrait<T>, T: StacksMessageCodec + Clone + Send + Debug> RunLo
                 warn!("Error while fetching stackerdb slots {reward_cycle}: {e:?}");
                 e
             })?;
+
+        let dry_run = self.config.dry_run;
         let current_addr = self.stacks_client.get_signer_address();
 
-        let Some(signer_slot_id) = signer_slot_ids.get(current_addr) else {
-            warn!(
+        let signer_config_mode = if !dry_run {
+            let Some(signer_slot_id) = signer_slot_ids.get(current_addr) else {
+                warn!(
                     "Signer {current_addr} was not found in stacker db. Must not be registered for this reward cycle {reward_cycle}."
                 );
-            return Ok(None);
-        };
-        let Some(signer_id) = signer_entries.signer_addr_to_id.get(current_addr) else {
-            warn!(
-                "Signer {current_addr} was found in stacker db but not the reward set for reward cycle {reward_cycle}."
+                return Ok(None);
+            };
+            let Some(signer_id) = signer_entries.signer_addr_to_id.get(current_addr) else {
+                warn!(
+                    "Signer {current_addr} was found in stacker db but not the reward set for reward cycle {reward_cycle}."
+                );
+                return Ok(None);
+            };
+            info!(
+                "Signer #{signer_id} ({current_addr}) is registered for reward cycle {reward_cycle}."
             );
-            return Ok(None);
+            SignerConfigMode::Normal {
+                signer_slot_id: *signer_slot_id,
+                signer_id: *signer_id,
+            }
+        } else {
+            if signer_slot_ids.contains_key(current_addr) {
+                error!(
+                    "Signer is configured for dry-run, but the signer address {current_addr} was found in stacker db."
+                );
+                return Err(ConfigurationError::DryRunStackerIsRegistered);
+            };
+            if signer_entries.signer_addr_to_id.contains_key(current_addr) {
+                warn!(
+                    "Signer {current_addr} was found in stacker db but not the reward set for reward cycle {reward_cycle}."
+                );
+                return Ok(None);
+            };
+            SignerConfigMode::DryRun
         };
-        info!(
-            "Signer #{signer_id} ({current_addr}) is registered for reward cycle {reward_cycle}."
-        );
         Ok(Some(SignerConfig {
             reward_cycle,
-            signer_id: *signer_id,
-            signer_slot_id: *signer_slot_id,
+            signer_mode: signer_config_mode,
             signer_entries,
             signer_slot_ids: signer_slot_ids.into_values().collect(),
             first_proposal_burn_block_timing: self.config.first_proposal_burn_block_timing,
@@ -290,7 +324,11 @@ impl<Signer: SignerTrait<T>, T: StacksMessageCodec + Clone + Send + Debug> RunLo
             tenure_last_block_proposal_timeout: self.config.tenure_last_block_proposal_timeout,
             block_proposal_validation_timeout: self.config.block_proposal_validation_timeout,
             tenure_idle_timeout: self.config.tenure_idle_timeout,
+            tenure_idle_timeout_buffer: self.config.tenure_idle_timeout_buffer,
             block_proposal_max_age_secs: self.config.block_proposal_max_age_secs,
+            reorg_attempts_activity_timeout: self.config.reorg_attempts_activity_timeout,
+            proposal_wait_for_parent_time: self.config.proposal_wait_for_parent_time,
+            validate_with_replay_tx: self.config.validate_with_replay_tx,
         }))
     }
 
@@ -299,9 +337,9 @@ impl<Signer: SignerTrait<T>, T: StacksMessageCodec + Clone + Send + Debug> RunLo
         let reward_index = reward_cycle % 2;
         let new_signer_config = match self.get_signer_config(reward_cycle) {
             Ok(Some(new_signer_config)) => {
-                let signer_id = new_signer_config.signer_id;
-                let new_signer = Signer::new(new_signer_config);
-                info!("{new_signer} Signer is registered for reward cycle {reward_cycle} as signer #{signer_id}. Initialized signer state.");
+                let signer_mode = new_signer_config.signer_mode.clone();
+                let new_signer = Signer::new(&self.stacks_client, new_signer_config);
+                info!("{new_signer} Signer is registered for reward cycle {reward_cycle} as {signer_mode}. Initialized signer state.");
                 ConfiguredSigner::RegisteredSigner(new_signer)
             }
             Ok(None) => {
@@ -437,9 +475,15 @@ impl<Signer: SignerTrait<T>, T: StacksMessageCodec + Clone + Send + Debug> RunLo
                 // We are either the current or a future reward cycle, so we are not stale.
                 continue;
             }
-            if let ConfiguredSigner::RegisteredSigner(signer) = signer {
-                if !signer.has_unprocessed_blocks() {
-                    debug!("{signer}: Signer's tenure has completed.");
+            match signer {
+                ConfiguredSigner::RegisteredSigner(signer) => {
+                    if !signer.has_unprocessed_blocks() {
+                        debug!("{signer}: Signer's tenure has completed.");
+                        to_delete.push(*idx);
+                    }
+                }
+                ConfiguredSigner::NotRegistered { .. } => {
+                    debug!("{signer}: Unregistered signer's tenure has completed.");
                     to_delete.push(*idx);
                 }
             }
@@ -451,7 +495,7 @@ impl<Signer: SignerTrait<T>, T: StacksMessageCodec + Clone + Send + Debug> RunLo
 }
 
 impl<Signer: SignerTrait<T>, T: StacksMessageCodec + Clone + Send + Debug>
-    SignerRunLoop<Vec<SignerResult>, T> for RunLoop<Signer, T>
+    SignerRunLoop<SignerResult, T> for RunLoop<Signer, T>
 {
     fn set_event_timeout(&mut self, timeout: Duration) {
         self.config.event_timeout = timeout;
@@ -464,16 +508,16 @@ impl<Signer: SignerTrait<T>, T: StacksMessageCodec + Clone + Send + Debug>
     fn run_one_pass(
         &mut self,
         event: Option<SignerEvent<T>>,
-        res: &Sender<Vec<SignerResult>>,
-    ) -> Option<Vec<SignerResult>> {
+        res: &Sender<SignerResult>,
+    ) -> Option<SignerResult> {
         debug!(
             "Running one pass for the signer. state={:?}, event={event:?}",
             self.state
         );
+
         // This is the only event that we respond to from the outer signer runloop
         if let Some(SignerEvent::StatusCheck) = event {
-            info!("Signer status check requested: {:?}.", self.state);
-            if let Err(e) = res.send(vec![StateInfo {
+            let state_info = StateInfo {
                 runloop_state: self.state,
                 reward_cycle_info: self.current_reward_cycle_info,
                 running_signers: self
@@ -481,9 +525,44 @@ impl<Signer: SignerTrait<T>, T: StacksMessageCodec + Clone + Send + Debug>
                     .values()
                     .map(|s| s.reward_cycle())
                     .collect(),
-            }
-            .into()])
-            {
+                signer_state_machines: self
+                    .stacks_signers
+                    .iter()
+                    .map(|(reward_cycle, signer)| {
+                        let ConfiguredSigner::RegisteredSigner(ref signer) = signer else {
+                            return (*reward_cycle, None);
+                        };
+                        (
+                            *reward_cycle,
+                            Some(signer.get_local_state_machine().clone()),
+                        )
+                    })
+                    .collect(),
+                pending_proposals_count: self
+                    .stacks_signers
+                    .values()
+                    .find_map(|signer| {
+                        if let ConfiguredSigner::RegisteredSigner(signer) = signer {
+                            Some(signer.get_pending_proposals_count())
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap_or(0),
+                signer_canonical_tips: self
+                    .stacks_signers
+                    .iter()
+                    .map(|(reward_cycle, signer)| {
+                        let ConfiguredSigner::RegisteredSigner(ref signer) = signer else {
+                            return (*reward_cycle, None);
+                        };
+                        (*reward_cycle, signer.get_canonical_tip())
+                    })
+                    .collect(),
+            };
+            info!("Signer status check requested: {state_info:?}");
+
+            if let Err(e) = res.send(state_info.into()) {
                 error!("Failed to send status check result: {e}.");
             }
         }
@@ -502,6 +581,7 @@ impl<Signer: SignerTrait<T>, T: StacksMessageCodec + Clone + Send + Debug>
                 warn!("Signer may have an outdated view of the network.");
             }
         }
+
         let current_reward_cycle = self
             .current_reward_cycle_info
             .as_ref()
@@ -521,6 +601,7 @@ impl<Signer: SignerTrait<T>, T: StacksMessageCodec + Clone + Send + Debug>
                 current_reward_cycle,
             );
         }
+
         if self.state == State::NoRegisteredSigners && event.is_some() {
             let next_reward_cycle = current_reward_cycle.saturating_add(1);
             info!("Signer is not registered for the current reward cycle ({current_reward_cycle}). Reward set is not yet determined or signer is not registered for the upcoming reward cycle ({next_reward_cycle}).");
@@ -544,7 +625,8 @@ mod tests {
         let weight = 10;
         let mut signer_entries = Vec::with_capacity(nmb_signers);
         for _ in 0..nmb_signers {
-            let key = StacksPublicKey::from_private(&StacksPrivateKey::new()).to_bytes_compressed();
+            let key =
+                StacksPublicKey::from_private(&StacksPrivateKey::random()).to_bytes_compressed();
             let mut signing_key = [0u8; 33];
             signing_key.copy_from_slice(&key);
             signer_entries.push(NakamotoSignerEntry {

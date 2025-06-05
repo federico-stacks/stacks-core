@@ -34,7 +34,6 @@ use clarity::types::chainstate::StacksPublicKey;
 use clarity::util::sleep_ms;
 use libsigner::{SignerSession, VERSION_STRING};
 use libstackerdb::StackerDBChunkData;
-use slog::{slog_debug, slog_error};
 use stacks_common::util::hash::to_hex;
 use stacks_common::util::secp256k1::MessageSignature;
 use stacks_common::{debug, error};
@@ -409,10 +408,10 @@ pub mod tests {
     #[test]
     fn test_verify_vote() {
         let mut rand = rand::thread_rng();
-        let private_key = Secp256k1PrivateKey::new();
+        let private_key = Secp256k1PrivateKey::random();
         let public_key = StacksPublicKey::from_private(&private_key);
 
-        let invalid_private_key = Secp256k1PrivateKey::new();
+        let invalid_private_key = Secp256k1PrivateKey::random();
         let invalid_public_key = StacksPublicKey::from_private(&invalid_private_key);
 
         let sip = rand.next_u32();

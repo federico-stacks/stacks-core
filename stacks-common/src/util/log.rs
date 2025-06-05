@@ -15,13 +15,12 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 use std::io::Write;
-use std::sync::Mutex;
 use std::time::{Duration, SystemTime};
 use std::{env, io, thread};
 
 use chrono::prelude::*;
 use lazy_static::lazy_static;
-use slog::{BorrowedKV, Drain, FnValue, Level, Logger, OwnedKVList, Record, KV};
+use slog::{Drain, Level, Logger, OwnedKVList, Record, KV};
 use slog_term::{CountingWriter, Decorator, RecordDecorator, Serializer};
 
 lazy_static! {
@@ -191,6 +190,10 @@ impl<D: Decorator> TermFormat<D> {
 
 #[cfg(feature = "slog_json")]
 fn make_json_logger() -> Logger {
+    use std::sync::Mutex;
+
+    use slog::FnValue;
+
     let def_keys = o!("file" => FnValue(move |info| {
                           info.file()
                       }),
@@ -222,7 +225,7 @@ fn make_logger() -> Logger {
         let debug = env::var("STACKS_LOG_DEBUG") == Ok("1".into());
         let pretty_print = env::var("STACKS_LOG_PP") == Ok("1".into());
         let decorator = get_decorator();
-        let atty = isatty(Stream::Stderr);
+        let atty = isatty();
         let drain = TermFormat::new(decorator, pretty_print, debug, atty);
         Logger::root(drain.ignore_res(), o!())
     }
@@ -233,9 +236,21 @@ fn get_decorator() -> slog_term::PlainSyncDecorator<slog_term::TestStdoutWriter>
     slog_term::PlainSyncDecorator::new(slog_term::TestStdoutWriter)
 }
 
+#[cfg(any(test, feature = "testing"))]
+fn isatty() -> bool {
+    use std::io::IsTerminal;
+    io::stdout().is_terminal()
+}
+
 #[cfg(not(any(test, feature = "testing")))]
 fn get_decorator() -> slog_term::PlainSyncDecorator<std::io::Stderr> {
     slog_term::PlainSyncDecorator::new(std::io::stderr())
+}
+
+#[cfg(not(any(test, feature = "testing")))]
+fn isatty() -> bool {
+    use std::io::IsTerminal;
+    io::stderr().is_terminal()
 }
 
 fn inner_get_loglevel() -> slog::Level {
@@ -265,7 +280,7 @@ macro_rules! trace {
     ($($arg:tt)*) => ({
         let cur_level = $crate::util::log::get_loglevel();
         if slog::Level::Trace.is_at_least(cur_level) {
-            slog_trace!($crate::util::log::LOGGER, $($arg)*)
+            slog::slog_trace!($crate::util::log::LOGGER, $($arg)*)
         }
     })
 }
@@ -275,7 +290,7 @@ macro_rules! error {
     ($($arg:tt)*) => ({
         let cur_level = $crate::util::log::get_loglevel();
         if slog::Level::Error.is_at_least(cur_level) {
-            slog_error!($crate::util::log::LOGGER, $($arg)*)
+            slog::slog_error!($crate::util::log::LOGGER, $($arg)*)
         }
     })
 }
@@ -285,7 +300,7 @@ macro_rules! warn {
     ($($arg:tt)*) => ({
         let cur_level = $crate::util::log::get_loglevel();
         if slog::Level::Warning.is_at_least(cur_level) {
-            slog_warn!($crate::util::log::LOGGER, $($arg)*)
+            slog::slog_warn!($crate::util::log::LOGGER, $($arg)*)
         }
     })
 }
@@ -295,7 +310,7 @@ macro_rules! info {
     ($($arg:tt)*) => ({
         let cur_level = $crate::util::log::get_loglevel();
         if slog::Level::Info.is_at_least(cur_level) {
-            slog_info!($crate::util::log::LOGGER, $($arg)*)
+            slog::slog_info!($crate::util::log::LOGGER, $($arg)*)
         }
     })
 }
@@ -305,7 +320,7 @@ macro_rules! debug {
     ($($arg:tt)*) => ({
         let cur_level = $crate::util::log::get_loglevel();
         if slog::Level::Debug.is_at_least(cur_level) {
-            slog_debug!($crate::util::log::LOGGER, $($arg)*)
+            slog::slog_debug!($crate::util::log::LOGGER, $($arg)*)
         }
     })
 }
@@ -315,7 +330,7 @@ macro_rules! fatal {
     ($($arg:tt)*) => ({
         let cur_level = $crate::util::log::get_loglevel();
         if slog::Level::Critical.is_at_least(cur_level) {
-            slog_crit!($crate::util::log::LOGGER, $($arg)*)
+            slog::slog_crit!($crate::util::log::LOGGER, $($arg)*)
         }
     })
 }
@@ -328,21 +343,17 @@ fn color_if_tty(color: &str, isatty: bool) -> &str {
     }
 }
 
-enum Stream {
-    Stdout,
-    Stderr,
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-#[cfg(unix)]
-fn isatty(stream: Stream) -> bool {
-    let fd = match stream {
-        Stream::Stdout => libc::STDOUT_FILENO,
-        Stream::Stderr => libc::STDERR_FILENO,
-    };
-    unsafe { libc::isatty(fd) != 0 }
-}
-
-#[cfg(not(unix))]
-fn isatty(stream: Stream) -> bool {
-    false
+    #[test]
+    #[ignore = "manual test"]
+    fn test_log_pretty_print() {
+        env::set_var("STACKS_LOG_PP", "1");
+        let logger: Logger = make_logger();
+        slog::slog_info!(logger, "Info test"); //equivalent to info!(..)
+        slog::slog_warn!(logger, "Warn test"); //equivalent to warn!(..)
+        slog::slog_error!(logger, "Erro test"); //equivalent to erro!(..)
+    }
 }

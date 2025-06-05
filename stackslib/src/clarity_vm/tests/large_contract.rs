@@ -159,7 +159,8 @@ fn test_simple_token_system(#[case] version: ClarityVersion, #[case] epoch: Stac
                     &ast,
                     BOOT_CODE_COSTS_2,
                     None,
-                    |_, _| false,
+                    |_, _| None,
+                    None,
                 )
                 .unwrap();
             }
@@ -184,7 +185,8 @@ fn test_simple_token_system(#[case] version: ClarityVersion, #[case] epoch: Stac
                     &ast,
                     BOOT_CODE_COSTS_3,
                     None,
-                    |_, _| false,
+                    |_, _| None,
+                    None,
                 )
                 .unwrap();
             }
@@ -221,7 +223,8 @@ fn test_simple_token_system(#[case] version: ClarityVersion, #[case] epoch: Stac
                 &contract_ast,
                 tokens_contract,
                 None,
-                |_, _| false,
+                |_, _| None,
+                None,
             )
             .unwrap()
         });
@@ -234,7 +237,8 @@ fn test_simple_token_system(#[case] version: ClarityVersion, #[case] epoch: Stac
                     &contract_identifier,
                     "token-transfer",
                     &[p1.clone().into(), Value::UInt(210)],
-                    |_, _| false
+                    |_, _| None,
+                    None
                 ))
                 .unwrap()
                 .0
@@ -247,7 +251,8 @@ fn test_simple_token_system(#[case] version: ClarityVersion, #[case] epoch: Stac
                     &contract_identifier,
                     "token-transfer",
                     &[p2.clone().into(), Value::UInt(9000)],
-                    |_, _| false
+                    |_, _| None,
+                    None
                 ))
                 .unwrap()
                 .0
@@ -261,7 +266,8 @@ fn test_simple_token_system(#[case] version: ClarityVersion, #[case] epoch: Stac
                     &contract_identifier,
                     "token-transfer",
                     &[p2.clone().into(), Value::UInt(1001)],
-                    |_, _| false
+                    |_, _| None,
+                    None
                 ))
                 .unwrap()
                 .0
@@ -269,7 +275,7 @@ fn test_simple_token_system(#[case] version: ClarityVersion, #[case] epoch: Stac
         assert!(is_committed(
             & // send to self!
             block.as_transaction(|tx| tx.run_contract_call(&p1, None, &contract_identifier, "token-transfer",
-                                    &[p1.clone().into(), Value::UInt(1000)], |_, _| false)).unwrap().0
+                                    &[p1.clone().into(), Value::UInt(1000)], |_, _| None, None)).unwrap().0
         ));
 
         assert_eq!(
@@ -299,7 +305,8 @@ fn test_simple_token_system(#[case] version: ClarityVersion, #[case] epoch: Stac
                     &contract_identifier,
                     "faucet",
                     &[],
-                    |_, _| false
+                    |_, _| None,
+                    None
                 ))
                 .unwrap()
                 .0
@@ -313,7 +320,8 @@ fn test_simple_token_system(#[case] version: ClarityVersion, #[case] epoch: Stac
                     &contract_identifier,
                     "faucet",
                     &[],
-                    |_, _| false
+                    |_, _| None,
+                    None
                 ))
                 .unwrap()
                 .0
@@ -327,7 +335,8 @@ fn test_simple_token_system(#[case] version: ClarityVersion, #[case] epoch: Stac
                     &contract_identifier,
                     "faucet",
                     &[],
-                    |_, _| false
+                    |_, _| None,
+                    None
                 ))
                 .unwrap()
                 .0
@@ -351,7 +360,8 @@ fn test_simple_token_system(#[case] version: ClarityVersion, #[case] epoch: Stac
                     &contract_identifier,
                     "mint-after",
                     &[Value::UInt(25)],
-                    |_, _| false
+                    |_, _| None,
+                    None
                 ))
                 .unwrap()
                 .0
@@ -388,7 +398,8 @@ fn test_simple_token_system(#[case] version: ClarityVersion, #[case] epoch: Stac
                     &contract_identifier,
                     "mint-after",
                     &[Value::UInt(25)],
-                    |_, _| false
+                    |_, _| None,
+                    None
                 ))
                 .unwrap()
                 .0
@@ -402,7 +413,8 @@ fn test_simple_token_system(#[case] version: ClarityVersion, #[case] epoch: Stac
                     &contract_identifier,
                     "faucet",
                     &[],
-                    |_, _| false
+                    |_, _| None,
+                    None
                 ))
                 .unwrap()
                 .0
@@ -425,7 +437,8 @@ fn test_simple_token_system(#[case] version: ClarityVersion, #[case] epoch: Stac
                     &contract_identifier,
                     "my-get-token-balance",
                     &[p1.clone().into()],
-                    |_, _| false
+                    |_, _| None,
+                    None
                 ))
                 .unwrap()
                 .0,
@@ -572,7 +585,7 @@ fn inner_test_simple_naming_system(owned_env: &mut OwnedEnvironment, version: Cl
             &env.execute_contract(
                 &QualifiedContractIdentifier::local("names").unwrap(),
                 "preorder",
-                &symbols_from_values(vec![name_hash_expensive_0.clone(), Value::UInt(1000)]),
+                &symbols_from_values(vec![name_hash_expensive_0, Value::UInt(1000)]),
                 false
             )
             .unwrap(),
@@ -602,7 +615,7 @@ fn inner_test_simple_naming_system(owned_env: &mut OwnedEnvironment, version: Cl
     {
         // should work!
         let mut env = owned_env.get_exec_environment(
-            Some(p1.clone().expect_principal().unwrap()),
+            Some(p1.expect_principal().unwrap()),
             None,
             &placeholder_context,
         );
@@ -628,7 +641,7 @@ fn inner_test_simple_naming_system(owned_env: &mut OwnedEnvironment, version: Cl
             &env.execute_contract(
                 &QualifiedContractIdentifier::local("names").unwrap(),
                 "preorder",
-                &symbols_from_values(vec![name_hash_expensive_1.clone(), Value::UInt(100)]),
+                &symbols_from_values(vec![name_hash_expensive_1, Value::UInt(100)]),
                 false
             )
             .unwrap()
@@ -649,7 +662,7 @@ fn inner_test_simple_naming_system(owned_env: &mut OwnedEnvironment, version: Cl
             &env.execute_contract(
                 &QualifiedContractIdentifier::local("names").unwrap(),
                 "preorder",
-                &symbols_from_values(vec![name_hash_cheap_0.clone(), Value::UInt(100)]),
+                &symbols_from_values(vec![name_hash_cheap_0, Value::UInt(100)]),
                 false
             )
             .unwrap()
@@ -669,7 +682,7 @@ fn inner_test_simple_naming_system(owned_env: &mut OwnedEnvironment, version: Cl
             &env.execute_contract(
                 &QualifiedContractIdentifier::local("names").unwrap(),
                 "register",
-                &symbols_from_values(vec![p2.clone(), Value::Int(100001), Value::Int(0)]),
+                &symbols_from_values(vec![p2, Value::Int(100001), Value::Int(0)]),
                 false
             )
             .unwrap(),
@@ -747,7 +760,8 @@ pub fn rollback_log_memory_test(
                     &ct_ast,
                     &contract,
                     None,
-                    |_, _| { false }
+                    |_, _| None,
+                    None
                 )
                 .unwrap_err()
             )
@@ -823,7 +837,8 @@ pub fn let_memory_test(#[case] clarity_version: ClarityVersion, #[case] epoch_id
                     &ct_ast,
                     &contract,
                     None,
-                    |_, _| { false }
+                    |_, _| None,
+                    None
                 )
                 .unwrap_err()
             )
@@ -902,7 +917,8 @@ pub fn argument_memory_test(
                     &ct_ast,
                     &contract,
                     None,
-                    |_, _| { false }
+                    |_, _| None,
+                    None
                 )
                 .unwrap_err()
             )
@@ -997,11 +1013,12 @@ pub fn fcall_memory_test(#[case] clarity_version: ClarityVersion, #[case] epoch_
                     &ct_ast,
                     &contract_ok,
                     None,
-                    |_, _| true
+                    |_, _| Some("abort".to_string()),
+                    None
                 )
                 .unwrap_err()
             {
-                ClarityError::AbortedByCallback(..) => true,
+                ClarityError::AbortedByCallback { .. } => true,
                 _ => false,
             });
         });
@@ -1023,7 +1040,8 @@ pub fn fcall_memory_test(#[case] clarity_version: ClarityVersion, #[case] epoch_
                     &ct_ast,
                     &contract_err,
                     None,
-                    |_, _| false
+                    |_, _| None,
+                    None
                 )
                 .unwrap_err()
             )
@@ -1109,7 +1127,8 @@ pub fn ccall_memory_test(#[case] clarity_version: ClarityVersion, #[case] epoch_
                         &ct_ast,
                         &contract,
                         None,
-                        |_, _| false,
+                        |_, _| None,
+                        None,
                     )
                     .unwrap();
                     conn.save_analysis(&contract_identifier, &ct_analysis)
@@ -1133,7 +1152,8 @@ pub fn ccall_memory_test(#[case] clarity_version: ClarityVersion, #[case] epoch_
                             &ct_ast,
                             &contract,
                             None,
-                            |_, _| false
+                            |_, _| None,
+                            None
                         )
                         .unwrap_err()
                     )

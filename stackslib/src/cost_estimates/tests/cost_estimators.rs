@@ -1,5 +1,6 @@
 use std::env;
 use std::path::PathBuf;
+use std::time::Instant;
 
 use clarity::vm::costs::ExecutionCost;
 use clarity::vm::types::{PrincipalData, StandardPrincipalData};
@@ -11,7 +12,6 @@ use stacks_common::types::chainstate::{
 };
 use stacks_common::util::hash::{to_hex, Hash160, Sha512Trunc256Sum};
 use stacks_common::util::vrf::VRFProof;
-use time::Instant;
 
 use crate::chainstate::burn::ConsensusHash;
 use crate::chainstate::stacks::db::{StacksEpochReceipt, StacksHeaderInfo};
@@ -81,7 +81,7 @@ fn make_dummy_coinbase_tx() -> StacksTransactionReceipt {
 
 fn make_dummy_transfer_payload() -> TransactionPayload {
     TransactionPayload::TokenTransfer(
-        PrincipalData::Standard(StandardPrincipalData(0, [0; 20])),
+        PrincipalData::Standard(StandardPrincipalData::new(0, [0; 20]).unwrap()),
         1,
         TokenTransferMemo([0; 34]),
     )
@@ -92,7 +92,7 @@ fn make_dummy_transfer_tx() -> StacksTransactionReceipt {
         TransactionVersion::Mainnet,
         TransactionAuth::Standard(TransactionSpendingCondition::new_initial_sighash()),
         TransactionPayload::TokenTransfer(
-            PrincipalData::Standard(StandardPrincipalData(0, [0; 20])),
+            PrincipalData::Standard(StandardPrincipalData::new(0, [0; 20]).unwrap()),
             1,
             TokenTransferMemo([0; 34]),
         ),
@@ -123,12 +123,13 @@ fn make_dummy_cc_tx(
         Value::okay(Value::Bool(true)).unwrap(),
         0,
         execution_cost,
+        None,
     )
 }
 
 fn make_dummy_cc_payload(contract_name: &str, function_name: &str) -> TransactionPayload {
     TransactionPayload::ContractCall(TransactionContractCall {
-        address: StacksAddress::new(0, Hash160([0; 20])),
+        address: StacksAddress::new(0, Hash160([0; 20])).unwrap(),
         contract_name: contract_name.into(),
         function_name: function_name.into(),
         function_args: vec![],
@@ -254,13 +255,13 @@ fn test_pessimistic_cost_estimator_declining_average() {
 fn pessimistic_estimator_contract_owner_separation() {
     let mut estimator = instantiate_test_db();
     let cc_payload_0 = TransactionPayload::ContractCall(TransactionContractCall {
-        address: StacksAddress::new(0, Hash160([0; 20])),
+        address: StacksAddress::new(0, Hash160([0; 20])).unwrap(),
         contract_name: "contract-1".into(),
         function_name: "func1".into(),
         function_args: vec![],
     });
     let cc_payload_1 = TransactionPayload::ContractCall(TransactionContractCall {
-        address: StacksAddress::new(0, Hash160([1; 20])),
+        address: StacksAddress::new(0, Hash160([1; 20])).unwrap(),
         contract_name: "contract-1".into(),
         function_name: "func1".into(),
         function_args: vec![],
@@ -827,11 +828,7 @@ fn test_cost_estimator_epochs_independent() {
 
     // Setup: "notify" cost_200 in Epoch20.
     estimator.notify_block(
-        &vec![make_dummy_cc_tx(
-            &contract_name,
-            &func_name,
-            cost_200.clone(),
-        )],
+        &vec![make_dummy_cc_tx(contract_name, func_name, cost_200.clone())],
         &BLOCK_LIMIT_MAINNET_20,
         &StacksEpochId::Epoch20,
     );
@@ -842,7 +839,7 @@ fn test_cost_estimator_epochs_independent() {
             make_dummy_coinbase_tx(),
             make_dummy_transfer_tx(),
             make_dummy_transfer_tx(),
-            make_dummy_cc_tx(&contract_name, &func_name, cost_205.clone()),
+            make_dummy_cc_tx(contract_name, func_name, cost_205.clone()),
         ],
         &BLOCK_LIMIT_MAINNET_20,
         &StacksEpochId::Epoch2_05,
@@ -856,7 +853,7 @@ fn test_cost_estimator_epochs_independent() {
                 &StacksEpochId::Epoch20
             )
             .expect("Should be able to provide cost estimate now"),
-        cost_200.clone(),
+        cost_200,
     );
 
     // Check: We get back cost_205 for Epoch2_05.
@@ -867,6 +864,6 @@ fn test_cost_estimator_epochs_independent() {
                 &StacksEpochId::Epoch2_05
             )
             .expect("Should be able to provide cost estimate now"),
-        cost_205.clone(),
+        cost_205,
     );
 }

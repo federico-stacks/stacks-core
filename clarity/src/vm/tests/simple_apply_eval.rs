@@ -14,6 +14,8 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
+use std::time::Duration;
+
 use rstest::rstest;
 use rstest_reuse::{self, *};
 use stacks_common::address::{
@@ -37,8 +39,10 @@ use crate::vm::types::{
     StacksAddressExtensions, TypeSignature,
 };
 use crate::vm::{
-    eval, execute as vm_execute, execute_v2 as vm_execute_v2, execute_with_parameters, CallStack,
-    ClarityVersion, ContractContext, Environment, GlobalContext, LocalContext, Value,
+    eval, execute as vm_execute, execute_v2 as vm_execute_v2,
+    execute_with_limited_execution_time as vm_execute_with_limited_execution_time,
+    execute_with_parameters, CallStack, ClarityVersion, ContractContext, CostErrors, Environment,
+    GlobalContext, LocalContext, Value,
 };
 
 #[test]
@@ -430,7 +434,7 @@ fn test_secp256k1() {
     )
     .unwrap();
     eprintln!("addr from privk {:?}", &addr);
-    let principal = addr.to_account_principal();
+    let principal = addr.into();
     if let PrincipalData::Standard(data) = principal {
         eprintln!("test_secp256k1 principal {:?}", data.to_address());
     }
@@ -446,7 +450,7 @@ fn test_secp256k1() {
     )
     .unwrap();
     eprintln!("addr from hex {:?}", addr);
-    let principal = addr.to_account_principal();
+    let principal: PrincipalData = addr.into();
     if let PrincipalData::Standard(data) = principal.clone() {
         eprintln!("test_secp256k1 principal {:?}", data.to_address());
     }
@@ -491,8 +495,8 @@ fn test_principal_of_fix() {
         .unwrap()],
     )
     .unwrap()
-    .to_account_principal();
-    let testnet_principal = StacksAddress::from_public_keys(
+    .into();
+    let testnet_principal: PrincipalData = StacksAddress::from_public_keys(
         C32_ADDRESS_VERSION_TESTNET_SINGLESIG,
         &AddressHashMode::SerializeP2PKH,
         1,
@@ -502,7 +506,7 @@ fn test_principal_of_fix() {
         .unwrap()],
     )
     .unwrap()
-    .to_account_principal();
+    .into();
 
     // Clarity2, mainnet, should have a mainnet principal.
     assert_eq!(
@@ -1762,4 +1766,14 @@ fn test_chain_id() {
                 .unwrap()
             )
         });
+}
+
+#[test]
+fn test_execution_time_expiration() {
+    assert_eq!(
+        vm_execute_with_limited_execution_time("(+ 1 1)", Duration::from_secs(0))
+            .err()
+            .unwrap(),
+        CostErrors::ExecutionTimeExpired.into()
+    );
 }

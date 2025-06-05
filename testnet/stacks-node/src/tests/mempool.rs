@@ -15,6 +15,10 @@ use stacks::chainstate::stacks::{
 };
 use stacks::codec::StacksMessageCodec;
 use stacks::core::mempool::MemPoolDB;
+use stacks::core::test_util::{
+    make_coinbase, make_contract_call, make_contract_publish, make_poison,
+    make_stacks_transfer_serialized, sign_standard_single_sig_tx_anchor_mode_version, to_addr,
+};
 use stacks::core::{StacksEpochId, CHAIN_ID_TESTNET};
 use stacks::cost_estimates::metrics::UnitMetric;
 use stacks::cost_estimates::UnitEstimator;
@@ -24,10 +28,7 @@ use stacks_common::types::chainstate::{BlockHeaderHash, StacksAddress};
 use stacks_common::util::hash::*;
 use stacks_common::util::secp256k1::*;
 
-use super::{
-    make_coinbase, make_contract_call, make_contract_publish, make_poison, make_stacks_transfer,
-    serialize_sign_standard_single_sig_tx_anchor_mode_version, to_addr, SK_1, SK_2,
-};
+use super::{SK_1, SK_2};
 use crate::helium::RunLoop;
 use crate::Keychain;
 
@@ -61,7 +62,7 @@ pub fn make_bad_stacks_transfer(
 
     let mut tx_signer = StacksTransactionSigner::new(&unsigned_tx);
 
-    tx_signer.sign_origin(&StacksPrivateKey::new()).unwrap();
+    tx_signer.sign_origin(&StacksPrivateKey::random()).unwrap();
 
     let mut buf = vec![];
     tx_signer
@@ -291,8 +292,14 @@ fn mempool_setup_chainstate() {
                     )
                     .unwrap();
 
-                let tx_bytes =
-                    make_stacks_transfer(&contract_sk, 5, 200, CHAIN_ID_TESTNET, &other_addr, 1000);
+                let tx_bytes = make_stacks_transfer_serialized(
+                    &contract_sk,
+                    5,
+                    200,
+                    CHAIN_ID_TESTNET,
+                    &other_addr,
+                    1000,
+                );
                 let tx =
                     StacksTransaction::consensus_deserialize(&mut tx_bytes.as_slice()).unwrap();
                 chain_state
@@ -328,7 +335,7 @@ fn mempool_setup_chainstate() {
 
                 // mismatched network on contract-call!
                 let bad_addr = StacksAddress::from_public_keys(
-                    88,
+                    18,
                     &AddressHashMode::SerializeP2PKH,
                     1,
                     &vec![StacksPublicKey::from_private(&other_sk)],
@@ -369,8 +376,14 @@ fn mempool_setup_chainstate() {
                 .unwrap()
                 .into();
 
-                let tx_bytes =
-                    make_stacks_transfer(&contract_sk, 5, 200, CHAIN_ID_TESTNET, &bad_addr, 1000);
+                let tx_bytes = make_stacks_transfer_serialized(
+                    &contract_sk,
+                    5,
+                    200,
+                    CHAIN_ID_TESTNET,
+                    &bad_addr,
+                    1000,
+                );
                 let tx =
                     StacksTransaction::consensus_deserialize(&mut tx_bytes.as_slice()).unwrap();
                 let e = chain_state
@@ -385,8 +398,14 @@ fn mempool_setup_chainstate() {
                 assert!(matches!(e, MemPoolRejection::BadAddressVersionByte));
 
                 // bad fees
-                let tx_bytes =
-                    make_stacks_transfer(&contract_sk, 5, 0, CHAIN_ID_TESTNET, &other_addr, 1000);
+                let tx_bytes = make_stacks_transfer_serialized(
+                    &contract_sk,
+                    5,
+                    0,
+                    CHAIN_ID_TESTNET,
+                    &other_addr,
+                    1000,
+                );
                 let tx =
                     StacksTransaction::consensus_deserialize(&mut tx_bytes.as_slice()).unwrap();
                 let e = chain_state
@@ -402,8 +421,14 @@ fn mempool_setup_chainstate() {
                 assert!(matches!(e, MemPoolRejection::FeeTooLow(0, _)));
 
                 // bad nonce
-                let tx_bytes =
-                    make_stacks_transfer(&contract_sk, 0, 200, CHAIN_ID_TESTNET, &other_addr, 1000);
+                let tx_bytes = make_stacks_transfer_serialized(
+                    &contract_sk,
+                    0,
+                    200,
+                    CHAIN_ID_TESTNET,
+                    &other_addr,
+                    1000,
+                );
                 let tx =
                     StacksTransaction::consensus_deserialize(&mut tx_bytes.as_slice()).unwrap();
                 let e = chain_state
@@ -419,7 +444,7 @@ fn mempool_setup_chainstate() {
                 assert!(matches!(e, MemPoolRejection::BadNonces(_)));
 
                 // not enough funds
-                let tx_bytes = make_stacks_transfer(
+                let tx_bytes = make_stacks_transfer_serialized(
                     &contract_sk,
                     5,
                     110000,
@@ -443,7 +468,7 @@ fn mempool_setup_chainstate() {
 
                 // sender == recipient
                 let contract_princ = PrincipalData::from(contract_addr);
-                let tx_bytes = make_stacks_transfer(
+                let tx_bytes = make_stacks_transfer_serialized(
                     &contract_sk,
                     5,
                     300,
@@ -470,10 +495,14 @@ fn mempool_setup_chainstate() {
                 });
 
                 // recipient must be testnet
-                let mut mainnet_recipient = to_addr(&other_sk);
-                mainnet_recipient.version = C32_ADDRESS_VERSION_MAINNET_SINGLESIG;
+                let testnet_recipient = to_addr(&other_sk);
+                let mainnet_recipient = StacksAddress::new(
+                    C32_ADDRESS_VERSION_MAINNET_SINGLESIG,
+                    testnet_recipient.destruct().1,
+                )
+                .unwrap();
                 let mainnet_princ = mainnet_recipient.into();
-                let tx_bytes = make_stacks_transfer(
+                let tx_bytes = make_stacks_transfer_serialized(
                     &contract_sk,
                     5,
                     300,
@@ -498,11 +527,11 @@ fn mempool_setup_chainstate() {
                 // tx version must be testnet
                 let contract_princ = PrincipalData::from(contract_addr);
                 let payload = TransactionPayload::TokenTransfer(
-                    contract_princ.clone(),
+                    contract_princ,
                     1000,
                     TokenTransferMemo([0; 34]),
                 );
-                let tx_bytes = serialize_sign_standard_single_sig_tx_anchor_mode_version(
+                let tx = sign_standard_single_sig_tx_anchor_mode_version(
                     payload,
                     &contract_sk,
                     5,
@@ -511,8 +540,8 @@ fn mempool_setup_chainstate() {
                     TransactionAnchorMode::OnChainOnly,
                     TransactionVersion::Mainnet,
                 );
-                let tx =
-                    StacksTransaction::consensus_deserialize(&mut tx_bytes.as_slice()).unwrap();
+                let mut tx_bytes = vec![];
+                tx.consensus_serialize(&mut tx_bytes).unwrap();
                 let e = chain_state
                     .will_admit_mempool_tx(
                         &NULL_BURN_STATE_DB,
@@ -526,8 +555,14 @@ fn mempool_setup_chainstate() {
                 assert!(matches!(e, MemPoolRejection::BadTransactionVersion));
 
                 // send amount must be positive
-                let tx_bytes =
-                    make_stacks_transfer(&contract_sk, 5, 300, CHAIN_ID_TESTNET, &other_addr, 0);
+                let tx_bytes = make_stacks_transfer_serialized(
+                    &contract_sk,
+                    5,
+                    300,
+                    CHAIN_ID_TESTNET,
+                    &other_addr,
+                    0,
+                );
                 let tx =
                     StacksTransaction::consensus_deserialize(&mut tx_bytes.as_slice()).unwrap();
                 let e = chain_state
@@ -543,7 +578,7 @@ fn mempool_setup_chainstate() {
                 assert!(matches!(e, MemPoolRejection::TransferAmountMustBePositive));
 
                 // not enough funds
-                let tx_bytes = make_stacks_transfer(
+                let tx_bytes = make_stacks_transfer_serialized(
                     &contract_sk,
                     5,
                     110000,
@@ -565,7 +600,7 @@ fn mempool_setup_chainstate() {
                 eprintln!("Err: {e:?}");
                 assert!(matches!(e, MemPoolRejection::NotEnoughFunds(111000, 99500)));
 
-                let tx_bytes = make_stacks_transfer(
+                let tx_bytes = make_stacks_transfer_serialized(
                     &contract_sk,
                     5,
                     99700,
@@ -818,7 +853,7 @@ fn mempool_setup_chainstate() {
                 let mut conf = super::new_test_conf();
                 conf.node.seed = vec![0x00];
 
-                let keychain = Keychain::default(conf.node.seed.clone());
+                let keychain = Keychain::default(conf.node.seed);
                 for i in 0..4 {
                     let microblock_secret_key = keychain.get_microblock_key(1 + i);
                     let mut microblock_pubkey =
@@ -878,7 +913,7 @@ fn mempool_setup_chainstate() {
                     StandardPrincipalData::from(contract_addr),
                     ContractName::from("implement-trait-contract"),
                 );
-                let contract_principal = PrincipalData::Contract(contract_id.clone());
+                let contract_principal = PrincipalData::Contract(contract_id);
 
                 let tx_bytes = make_contract_call(
                     &contract_sk,
@@ -906,7 +941,7 @@ fn mempool_setup_chainstate() {
                     StandardPrincipalData::from(contract_addr),
                     ContractName::from("bad-trait-contract"),
                 );
-                let contract_principal = PrincipalData::Contract(contract_id.clone());
+                let contract_principal = PrincipalData::Contract(contract_id);
 
                 let tx_bytes = make_contract_call(
                     &contract_sk,

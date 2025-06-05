@@ -63,7 +63,7 @@ use crate::net::inv::epoch2x::InvState;
 use crate::net::inv::nakamoto::{NakamotoInvStateMachine, NakamotoTenureInv};
 use crate::net::neighbors::rpc::NeighborRPC;
 use crate::net::neighbors::NeighborComms;
-use crate::net::p2p::{CurrentRewardSet, PeerNetwork};
+use crate::net::p2p::{CurrentRewardSet, DropReason, DropSource, PeerNetwork};
 use crate::net::server::HttpPeer;
 use crate::net::{Error as NetError, Neighbor, NeighborAddress, NeighborKey};
 use crate::util_lib::db::{DBConn, Error as DBError};
@@ -114,7 +114,8 @@ pub struct NakamotoDownloadStateMachine {
     /// Unconfirmed tenure download schedule
     unconfirmed_tenure_download_schedule: VecDeque<NeighborAddress>,
     /// Ongoing unconfirmed tenure downloads, prioritized in who announces the latest block
-    unconfirmed_tenure_downloads: HashMap<NeighborAddress, NakamotoUnconfirmedTenureDownloader>,
+    pub(crate) unconfirmed_tenure_downloads:
+        HashMap<NeighborAddress, NakamotoUnconfirmedTenureDownloader>,
     /// Ongoing confirmed tenure downloads for when we know the start and end block hashes.
     tenure_downloads: NakamotoTenureDownloaderSet,
     /// comms to remote neighbors
@@ -182,7 +183,7 @@ impl NakamotoDownloadStateMachine {
                 StacksBlockId(cursor.winning_stacks_block_hash.0),
                 cursor.block_height,
             ));
-            cursor = SortitionDB::get_block_snapshot(&ih, &cursor.parent_sortition_id)?
+            cursor = SortitionDB::get_block_snapshot(ih, &cursor.parent_sortition_id)?
                 .ok_or(DBError::NotFoundError)?;
         }
         wanted_tenures.reverse();
@@ -689,6 +690,34 @@ impl NakamotoDownloadStateMachine {
         schedule.into_iter().map(|(_count, ch)| ch).collect()
     }
 
+    /// Returns the highest Stacks tip height reported by the given neighbors.
+    ///
+    /// For each neighbor, this checks if there's an active unconfirmed download with a known
+    /// `tip_height`. If so, it's considered when finding the maximum.
+    ///
+    /// # Arguments
+    ///
+    /// * `neighbors` - A slice of `NeighborAddress` structs to check.
+    ///
+    /// # Returns
+    ///
+    /// * `Some(u64)` if at least one neighbor has a tip height.
+    /// * `None` if no tip heights are found.
+    pub(crate) fn get_max_stacks_height_of_neighbors(
+        &self,
+        neighbors: &[NeighborAddress],
+    ) -> Option<u64> {
+        neighbors
+            .iter()
+            .filter_map(|naddr| {
+                self.unconfirmed_tenure_downloads
+                    .get(naddr)
+                    .and_then(|downloader| downloader.tenure_tip.as_ref())
+                    .map(|tip| tip.tip_height)
+            })
+            .max()
+    }
+
     /// How many neighbors can we contact still, given the map of tenures to neighbors which can
     /// serve it?
     fn count_available_tenure_neighbors(
@@ -759,7 +788,7 @@ impl NakamotoDownloadStateMachine {
                     inventories.iter(),
                 )
             })
-            .unwrap_or(HashMap::new());
+            .unwrap_or_default();
 
         let mut available = Self::find_available_tenures(
             self.reward_cycle,
@@ -783,7 +812,7 @@ impl NakamotoDownloadStateMachine {
                     inventories.iter(),
                 )
             })
-            .unwrap_or(HashMap::new());
+            .unwrap_or_default();
 
         let mut tenure_block_ids = {
             debug!(
@@ -822,7 +851,7 @@ impl NakamotoDownloadStateMachine {
                         &available,
                     )
                 })
-                .unwrap_or(VecDeque::new());
+                .unwrap_or_default();
 
             let schedule = Self::make_ibd_download_schedule(
                 self.nakamoto_start_height,
@@ -843,7 +872,7 @@ impl NakamotoDownloadStateMachine {
                         &available,
                     )
                 })
-                .unwrap_or(VecDeque::new());
+                .unwrap_or_default();
 
             let schedule = Self::make_rarest_first_download_schedule(
                 self.nakamoto_start_height,
@@ -1144,7 +1173,7 @@ impl NakamotoDownloadStateMachine {
     ) {
         debug!("Run unconfirmed tenure downloaders");
 
-        let addrs: Vec<_> = downloaders.keys().map(|addr| addr.clone()).collect();
+        let addrs: Vec<_> = downloaders.keys().cloned().collect();
         let mut finished = vec![];
         let mut unconfirmed_blocks = HashMap::new();
         let mut highest_completed_tenure_downloaders = HashMap::new();
@@ -1179,19 +1208,18 @@ impl NakamotoDownloadStateMachine {
                 finished.push(naddr.clone());
                 continue;
             }
-            if neighbor_rpc.has_inflight(&naddr) {
-                debug!("Peer {} has an inflight request", naddr);
+            if neighbor_rpc.has_inflight(naddr) {
+                debug!("Peer {naddr} has an inflight request");
                 continue;
             }
 
             let _ = downloader
                 .try_advance_from_chainstate(chainstate)
-                .map_err(|e| {
+                .inspect_err(|e| {
                     warn!(
-                        "Failed to advance downloader in state {} for {}: {:?}",
-                        &downloader.state, &downloader.naddr, &e
-                    );
-                    e
+                        "Failed to advance downloader in state {} for {}: {e:?}",
+                        &downloader.state, &downloader.naddr
+                    )
                 });
 
             debug!(
@@ -1205,7 +1233,12 @@ impl NakamotoDownloadStateMachine {
                     "Downloader for {} failed; this peer is dead: {:?}",
                     &naddr, &e
                 );
-                neighbor_rpc.add_dead(network, naddr);
+                neighbor_rpc.add_dead(
+                    network,
+                    naddr,
+                    DropReason::DeadConnection(format!("Failed to send download request: {e}")),
+                    DropSource::NakamotoDownloadStateMachine,
+                );
                 continue;
             };
         }
@@ -1237,12 +1270,24 @@ impl NakamotoDownloadStateMachine {
             ) {
                 Ok(blocks_opt) => blocks_opt,
                 Err(NetError::StaleView) => {
-                    neighbor_rpc.add_dead(network, &naddr);
+                    neighbor_rpc.add_dead(
+                        network,
+                        &naddr,
+                        DropReason::DeadConnection("Stale view".into()),
+                        DropSource::NakamotoDownloadStateMachine,
+                    );
                     continue;
                 }
                 Err(e) => {
                     debug!("Failed to handle next download response from unconfirmed downloader for {:?} in state {:?}: {:?}", &naddr, &downloader.state, &e);
-                    neighbor_rpc.add_dead(network, &naddr);
+                    neighbor_rpc.add_dead(
+                        network,
+                        &naddr,
+                        DropReason::DeadConnection(format!(
+                            "Failed to handle next download response: {e}"
+                        )),
+                        DropSource::NakamotoDownloadStateMachine,
+                    );
                     continue;
                 }
             };
@@ -1257,13 +1302,11 @@ impl NakamotoDownloadStateMachine {
             {
                 if let Some(highest_complete_tenure_downloader) = downloader
                     .make_highest_complete_tenure_downloader()
-                    .map_err(|e| {
+                    .inspect_err(|e| {
                         warn!(
-                            "Failed to make highest complete tenure downloader for {:?}: {:?}",
-                            &downloader.unconfirmed_tenure_id(),
-                            &e
-                        );
-                        e
+                            "Failed to make highest complete tenure downloader for {:?}: {e:?}",
+                            &downloader.unconfirmed_tenure_id()
+                        )
                     })
                     .ok()
                 {
@@ -1402,8 +1445,7 @@ impl NakamotoDownloadStateMachine {
         let tenure_blocks = coalesced_blocks
             .into_iter()
             .map(|(consensus_hash, block_map)| {
-                let mut block_list: Vec<_> =
-                    block_map.into_iter().map(|(_, block)| block).collect();
+                let mut block_list: Vec<_> = block_map.into_values().collect();
                 block_list.sort_unstable_by_key(|blk| blk.header.chain_length);
                 (consensus_hash, block_list)
             })
@@ -1565,7 +1607,7 @@ impl NakamotoDownloadStateMachine {
     ) -> Result<HashMap<ConsensusHash, Vec<NakamotoBlock>>, NetError> {
         self.nakamoto_tip = network.stacks_tip.block_id();
         debug!("Downloader: Nakamoto tip is {:?}", &self.nakamoto_tip);
-        self.update_wanted_tenures(&network, sortdb)?;
+        self.update_wanted_tenures(network, sortdb)?;
         self.update_processed_tenures(chainstate)?;
         let new_blocks = self.run_downloads(burnchain_height, network, sortdb, chainstate, ibd);
         self.last_sort_tip = Some(network.burnchain_tip.clone());

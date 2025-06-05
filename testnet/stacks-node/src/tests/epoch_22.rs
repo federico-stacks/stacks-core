@@ -2,13 +2,14 @@ use std::collections::HashMap;
 use std::{env, thread};
 
 use clarity::vm::types::PrincipalData;
-use clarity::vm::ClarityVersion;
+use clarity::vm::{ClarityVersion, Value};
 use stacks::burnchains::{Burnchain, PoxConstants};
 use stacks::chainstate::stacks::address::PoxAddress;
 use stacks::chainstate::stacks::db::StacksChainState;
 use stacks::chainstate::stacks::miner::{signal_mining_blocked, signal_mining_ready};
 use stacks::clarity_cli::vm_execute as execute;
 use stacks::config::{EventKeyType, EventObserverConfig, InitialBalance};
+use stacks::core::test_util::{make_contract_call, make_stacks_transfer_serialized};
 use stacks::core::{self, EpochList, STACKS_EPOCH_MAX};
 use stacks::util_lib::boot::boot_code_id;
 use stacks_common::types::chainstate::{StacksAddress, StacksBlockId};
@@ -59,13 +60,13 @@ fn disable_pox() {
     let stacked = 100_000_000_000 * (core::MICROSTACKS_PER_STACKS as u64);
     let increase_by = 10_000_000 * (core::MICROSTACKS_PER_STACKS as u64);
 
-    let spender_sk = StacksPrivateKey::new();
+    let spender_sk = StacksPrivateKey::random();
     let spender_addr: PrincipalData = to_addr(&spender_sk).into();
 
-    let spender_2_sk = StacksPrivateKey::new();
+    let spender_2_sk = StacksPrivateKey::random();
     let spender_2_addr: PrincipalData = to_addr(&spender_2_sk).into();
 
-    let spender_3_sk = StacksPrivateKey::new();
+    let spender_3_sk = StacksPrivateKey::random();
     let spender_3_addr: PrincipalData = to_addr(&spender_3_sk).into();
 
     let mut initial_balances = vec![];
@@ -76,14 +77,14 @@ fn disable_pox() {
     });
 
     initial_balances.push(InitialBalance {
-        address: spender_2_addr.clone(),
+        address: spender_2_addr,
         amount: stacked + 100_000,
     });
 
     // // create a third initial balance so that there's more liquid ustx than the stacked amount bug.
     // //  otherwise, it surfaces the DoS vector.
     initial_balances.push(InitialBalance {
-        address: spender_3_addr.clone(),
+        address: spender_3_addr,
         amount: stacked + 100_000,
     });
 
@@ -220,7 +221,7 @@ fn disable_pox() {
         "stack-stx",
         &[
             Value::UInt(stacked.into()),
-            pox_addr_tuple_1.clone(),
+            pox_addr_tuple_1,
             Value::UInt(sort_height as u128),
             Value::UInt(12),
         ],
@@ -269,7 +270,7 @@ fn disable_pox() {
         "stack-stx",
         &[
             Value::UInt(stacked.into()),
-            pox_addr_tuple_2.clone(),
+            pox_addr_tuple_2,
             Value::UInt(sort_height as u128),
             Value::UInt(12),
         ],
@@ -288,7 +289,7 @@ fn disable_pox() {
         "stack-stx",
         &[
             Value::UInt(stacked.into()),
-            pox_addr_tuple_3.clone(),
+            pox_addr_tuple_3,
             Value::UInt(sort_height as u128),
             Value::UInt(10),
         ],
@@ -444,22 +445,23 @@ fn disable_pox() {
     let reward_cycle_max = *reward_cycle_pox_addrs.keys().max().unwrap();
 
     let pox_addr_1 = PoxAddress::Standard(
-        StacksAddress::new(26, Hash160::from_hex(&pox_pubkey_hash_1).unwrap()),
+        StacksAddress::new(26, Hash160::from_hex(&pox_pubkey_hash_1).unwrap()).unwrap(),
         Some(AddressHashMode::SerializeP2PKH),
     );
     let pox_addr_2 = PoxAddress::Standard(
-        StacksAddress::new(26, Hash160::from_hex(&pox_pubkey_hash_2).unwrap()),
+        StacksAddress::new(26, Hash160::from_hex(&pox_pubkey_hash_2).unwrap()).unwrap(),
         Some(AddressHashMode::SerializeP2PKH),
     );
     let pox_addr_3 = PoxAddress::Standard(
-        StacksAddress::new(26, Hash160::from_hex(&pox_pubkey_hash_3).unwrap()),
+        StacksAddress::new(26, Hash160::from_hex(&pox_pubkey_hash_3).unwrap()).unwrap(),
         Some(AddressHashMode::SerializeP2PKH),
     );
     let burn_pox_addr = PoxAddress::Standard(
         StacksAddress::new(
             26,
             Hash160::from_hex("0000000000000000000000000000000000000000").unwrap(),
-        ),
+        )
+        .unwrap(),
         Some(AddressHashMode::SerializeP2PKH),
     );
 
@@ -474,7 +476,7 @@ fn disable_pox() {
         ),
         (
             23u64,
-            HashMap::from([(pox_addr_1.clone(), 13u64), (burn_pox_addr.clone(), 1)]),
+            HashMap::from([(pox_addr_1, 13u64), (burn_pox_addr.clone(), 1)]),
         ),
         // cycle 24 is the first 2.1, it should have pox_2 and pox_3 with equal
         //  slots (because increase hasn't gone into effect yet) and 2 burn slots
@@ -491,14 +493,14 @@ fn disable_pox() {
         (
             25,
             HashMap::from([
-                (pox_addr_2.clone(), 9u64),
-                (pox_addr_3.clone(), 4),
+                (pox_addr_2, 9u64),
+                (pox_addr_3, 4),
                 (burn_pox_addr.clone(), 1),
             ]),
         ),
         // Epoch 2.2 has started, so the reward set should be all burns.
         (26, HashMap::from([(burn_pox_addr.clone(), 14)])),
-        (27, HashMap::from([(burn_pox_addr.clone(), 14)])),
+        (27, HashMap::from([(burn_pox_addr, 14)])),
     ]);
 
     for reward_cycle in reward_cycle_min..(reward_cycle_max + 1) {
@@ -579,13 +581,13 @@ fn pox_2_unlock_all() {
 
     let stacked = 100_000_000_000 * (core::MICROSTACKS_PER_STACKS as u64);
 
-    let spender_sk = StacksPrivateKey::new();
+    let spender_sk = StacksPrivateKey::random();
     let spender_addr: PrincipalData = to_addr(&spender_sk).into();
 
-    let spender_2_sk = StacksPrivateKey::new();
+    let spender_2_sk = StacksPrivateKey::random();
     let spender_2_addr: PrincipalData = to_addr(&spender_2_sk).into();
 
-    let spender_3_sk = StacksPrivateKey::new();
+    let spender_3_sk = StacksPrivateKey::random();
     let spender_3_addr: PrincipalData = to_addr(&spender_3_sk).into();
 
     let mut initial_balances = vec![];
@@ -643,6 +645,7 @@ fn pox_2_unlock_all() {
         endpoint: format!("localhost:{}", test_observer::EVENT_OBSERVER_PORT),
         events_keys: vec![EventKeyType::AnyEvent],
         timeout_ms: 1000,
+        disable_retries: false,
     });
     conf.initial_balances.append(&mut initial_balances);
 
@@ -742,7 +745,7 @@ fn pox_2_unlock_all() {
         "stack-stx",
         &[
             Value::UInt(stacked.into()),
-            pox_addr_tuple_1.clone(),
+            pox_addr_tuple_1,
             Value::UInt(sort_height as u128),
             Value::UInt(12),
         ],
@@ -803,7 +806,7 @@ fn pox_2_unlock_all() {
         "stack-stx",
         &[
             Value::UInt(stacked.into()),
-            pox_addr_tuple_2.clone(),
+            pox_addr_tuple_2,
             Value::UInt(sort_height as u128),
             Value::UInt(12),
         ],
@@ -823,7 +826,7 @@ fn pox_2_unlock_all() {
         "stack-stx",
         &[
             Value::UInt(stacked.into()),
-            pox_addr_tuple_3.clone(),
+            pox_addr_tuple_3,
             Value::UInt(sort_height as u128),
             Value::UInt(10),
         ],
@@ -958,7 +961,7 @@ fn pox_2_unlock_all() {
     );
 
     // perform a transfer
-    let tx = make_stacks_transfer(
+    let tx = make_stacks_transfer_serialized(
         &spender_sk,
         5,
         tx_fee,
@@ -1110,41 +1113,39 @@ fn pox_2_unlock_all() {
     let reward_cycle_max = *reward_cycle_pox_addrs.keys().max().unwrap();
 
     let pox_addr_1 = PoxAddress::Standard(
-        StacksAddress::new(26, Hash160::from_hex(&pox_pubkey_hash_1).unwrap()),
+        StacksAddress::new(26, Hash160::from_hex(&pox_pubkey_hash_1).unwrap()).unwrap(),
         Some(AddressHashMode::SerializeP2PKH),
     );
     let pox_addr_2 = PoxAddress::Standard(
-        StacksAddress::new(26, Hash160::from_hex(&pox_pubkey_hash_2).unwrap()),
+        StacksAddress::new(26, Hash160::from_hex(&pox_pubkey_hash_2).unwrap()).unwrap(),
         Some(AddressHashMode::SerializeP2PKH),
     );
     let pox_addr_3 = PoxAddress::Standard(
-        StacksAddress::new(26, Hash160::from_hex(&pox_pubkey_hash_3).unwrap()),
+        StacksAddress::new(26, Hash160::from_hex(&pox_pubkey_hash_3).unwrap()).unwrap(),
         Some(AddressHashMode::SerializeP2PKH),
     );
     let burn_pox_addr = PoxAddress::Standard(
         StacksAddress::new(
             26,
             Hash160::from_hex("0000000000000000000000000000000000000000").unwrap(),
-        ),
+        )
+        .unwrap(),
         Some(AddressHashMode::SerializeP2PKH),
     );
 
     let expected_slots = HashMap::from([
         (42u64, HashMap::from([(pox_addr_1.clone(), 4u64)])),
         (43, HashMap::from([(pox_addr_1.clone(), 4)])),
-        (44, HashMap::from([(pox_addr_1.clone(), 4)])),
+        (44, HashMap::from([(pox_addr_1, 4)])),
         // cycle 45 is the first 2.1, and in the setup of this test, there's not
         //  enough time for the stackers to begin in this cycle
         (45, HashMap::from([(burn_pox_addr.clone(), 4)])),
         (46, HashMap::from([(burn_pox_addr.clone(), 4)])),
-        (
-            47,
-            HashMap::from([(pox_addr_2.clone(), 2), (pox_addr_3.clone(), 2)]),
-        ),
+        (47, HashMap::from([(pox_addr_2, 2), (pox_addr_3, 2)])),
         // Now 2.2 is active, everything should be a burn.
         (48, HashMap::from([(burn_pox_addr.clone(), 4)])),
         (49, HashMap::from([(burn_pox_addr.clone(), 4)])),
-        (50, HashMap::from([(burn_pox_addr.clone(), 4)])),
+        (50, HashMap::from([(burn_pox_addr, 4)])),
     ]);
 
     for reward_cycle in reward_cycle_min..(reward_cycle_max + 1) {
@@ -1269,9 +1270,9 @@ fn test_pox_reorg_one_flap() {
     epochs.truncate_after(StacksEpochId::Epoch22);
     conf_template.burnchain.epochs = Some(epochs);
 
-    let privks: Vec<_> = (0..5).map(|_| StacksPrivateKey::new()).collect();
+    let privks: Vec<_> = (0..5).map(|_| StacksPrivateKey::random()).collect();
 
-    let stack_privks: Vec<_> = (0..5).map(|_| StacksPrivateKey::new()).collect();
+    let stack_privks: Vec<_> = (0..5).map(|_| StacksPrivateKey::random()).collect();
 
     let balances: Vec<_> = privks
         .iter()
@@ -1302,7 +1303,7 @@ fn test_pox_reorg_one_flap() {
     let mut miner_status = vec![];
 
     for i in 0..num_miners {
-        let seed = StacksPrivateKey::new().to_bytes();
+        let seed = StacksPrivateKey::random().to_bytes();
         let (mut conf, _) = neon_integration_test_conf_with_seed(seed);
 
         conf.initial_balances.clear();

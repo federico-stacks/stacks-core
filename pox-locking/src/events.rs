@@ -21,9 +21,6 @@ use clarity::vm::errors::Error as ClarityError;
 use clarity::vm::types::{PrincipalData, QualifiedContractIdentifier, ResponseData, TupleData};
 use clarity::vm::Value;
 #[cfg(any(test, feature = "testing"))]
-use slog::slog_debug;
-use slog::slog_error;
-#[cfg(any(test, feature = "testing"))]
 use stacks_common::debug;
 use stacks_common::types::StacksEpochId;
 use stacks_common::{error, test_debug};
@@ -545,7 +542,6 @@ fn create_event_info_data_code(
                     "#,
                     delegate_to = opt
                         .data
-                        .clone()
                         .map(|boxed_value| *boxed_value)
                         .unwrap()
                         .expect_tuple()

@@ -15,6 +15,9 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 use std::net::SocketAddr;
+use std::sync::{Arc, Mutex};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use clarity::vm::costs::ExecutionCost;
 use clarity::vm::types::{QualifiedContractIdentifier, StacksAddressExtensions};
@@ -28,6 +31,7 @@ use stacks_common::types::chainstate::{
 use stacks_common::util::get_epoch_time_secs;
 use stacks_common::util::hash::{to_hex, Hash160, Sha512Trunc256Sum};
 use stacks_common::util::pipe::Pipe;
+use stacks_common::util::serde_serializers::{prefix_hex, prefix_opt_hex};
 
 use crate::burnchains::bitcoin::indexer::BitcoinIndexer;
 use crate::burnchains::Txid;
@@ -41,13 +45,13 @@ use crate::chainstate::stacks::{
     TransactionAuth, TransactionPayload, TransactionPostConditionMode, TransactionVersion,
 };
 use crate::core::MemPoolDB;
-use crate::net::api::{prefix_hex, prefix_opt_hex};
 use crate::net::db::PeerDB;
 use crate::net::httpcore::{StacksHttpRequest, StacksHttpResponse};
 use crate::net::relay::Relayer;
 use crate::net::rpc::ConversationHttp;
-use crate::net::test::{TestEventObserver, TestPeer, TestPeerConfig};
+use crate::net::test::{RPCHandlerArgsType, TestEventObserver, TestPeer, TestPeerConfig};
 use crate::net::tests::inv::nakamoto::make_nakamoto_peers_from_invs_ext;
+use crate::net::tests::NakamotoBootPlan;
 use crate::net::{
     Attachment, AttachmentInstance, MemPoolEventDispatcher, RPCHandlerArgs, StackerDBConfig,
     StacksNodeState, UrlString,
@@ -68,6 +72,7 @@ mod getcontractabi;
 mod getcontractsrc;
 mod getdatavar;
 mod getheaders;
+mod gethealth;
 mod getinfo;
 mod getistraitimplemented;
 mod getmapentry;
@@ -84,6 +89,7 @@ mod getstxtransfercost;
 mod gettenure;
 mod gettenureinfo;
 mod gettenuretip;
+mod gettransaction;
 mod gettransaction_unconfirmed;
 mod liststackerdbreplicas;
 mod postblock;
@@ -226,10 +232,28 @@ pub struct TestRPC<'a> {
 
 impl<'a> TestRPC<'a> {
     pub fn setup(test_name: &str) -> TestRPC<'a> {
-        Self::setup_ex(test_name, true)
+        Self::setup_ex(test_name, true, None, None)
     }
 
-    pub fn setup_ex(test_name: &str, process_microblock: bool) -> TestRPC<'a> {
+    pub fn setup_with_rpc_args(
+        test_name: &str,
+        rpc_handler_args_opt_1: Option<RPCHandlerArgsType>,
+        rpc_handler_args_opt_2: Option<RPCHandlerArgsType>,
+    ) -> TestRPC<'a> {
+        Self::setup_ex(
+            test_name,
+            true,
+            rpc_handler_args_opt_1,
+            rpc_handler_args_opt_2,
+        )
+    }
+
+    pub fn setup_ex(
+        test_name: &str,
+        process_microblock: bool,
+        rpc_handler_args_opt_1: Option<RPCHandlerArgsType>,
+        rpc_handler_args_opt_2: Option<RPCHandlerArgsType>,
+    ) -> TestRPC<'a> {
         // ST2DS4MSWSGJ3W9FBC6BVT0Y92S345HY8N3T6AV7R
         let privk1 = StacksPrivateKey::from_hex(
             "9f1f85a512a96a244e4c0d762788500687feb97481639572e3bffbd6860e6ab001",
@@ -241,7 +265,7 @@ impl<'a> TestRPC<'a> {
             "94c319327cc5cd04da7147d32d836eb2e4c44f4db39aa5ede7314a761183d0c701",
         )
         .unwrap();
-        let microblock_privkey = StacksPrivateKey::new();
+        let microblock_privkey = StacksPrivateKey::random();
         let microblock_pubkeyhash =
             Hash160::from_node_public_key(&StacksPublicKey::from_private(&microblock_privkey));
 
@@ -317,6 +341,9 @@ impl<'a> TestRPC<'a> {
         let mut peer_1 = TestPeer::new(peer_1_config);
         let mut peer_2 = TestPeer::new(peer_2_config);
 
+        peer_1.rpc_handler_args = rpc_handler_args_opt_1;
+        peer_2.rpc_handler_args = rpc_handler_args_opt_2;
+
         // mine one block with a contract in it
         // first the coinbase
         // make a coinbase for this miner
@@ -377,7 +404,7 @@ impl<'a> TestRPC<'a> {
             TransactionAuth::from_p2pkh(&privk1).unwrap(),
             TransactionPayload::new_smart_contract(
                 "hello-world-unconfirmed",
-                &unconfirmed_contract.to_string(),
+                unconfirmed_contract,
                 None,
             )
             .unwrap(),
@@ -423,9 +450,8 @@ impl<'a> TestRPC<'a> {
             tx.commit().unwrap();
         }
 
-        let tip =
-            SortitionDB::get_canonical_burn_chain_tip(&peer_1.sortdb.as_ref().unwrap().conn())
-                .unwrap();
+        let tip = SortitionDB::get_canonical_burn_chain_tip(peer_1.sortdb.as_ref().unwrap().conn())
+            .unwrap();
         let mut anchor_cost = ExecutionCost::ZERO;
         let mut anchor_size = 0;
 
@@ -480,7 +506,7 @@ impl<'a> TestRPC<'a> {
         );
 
         let (_, _, consensus_hash) = peer_1.next_burnchain_block(burn_ops.clone());
-        peer_2.next_burnchain_block(burn_ops.clone());
+        peer_2.next_burnchain_block(burn_ops);
 
         peer_1.process_stacks_epoch_at_tip(&stacks_block, &[]);
         peer_2.process_stacks_epoch_at_tip(&stacks_block, &[]);
@@ -562,7 +588,7 @@ impl<'a> TestRPC<'a> {
         let mut mempool_tx = mempool.tx_begin().unwrap();
         let mut sendable_txs = vec![];
         for i in 0..20 {
-            let pk = StacksPrivateKey::new();
+            let pk = StacksPrivateKey::random();
             let addr = StacksAddress::from_public_keys(
                 C32_ADDRESS_VERSION_TESTNET_SINGLESIG,
                 &AddressHashMode::SerializeP2PKH,
@@ -694,9 +720,8 @@ impl<'a> TestRPC<'a> {
             .unwrap();
 
         // next tip, coinbase
-        let tip =
-            SortitionDB::get_canonical_burn_chain_tip(&peer_1.sortdb.as_ref().unwrap().conn())
-                .unwrap();
+        let tip = SortitionDB::get_canonical_burn_chain_tip(peer_1.sortdb.as_ref().unwrap().conn())
+            .unwrap();
 
         let mut tx_coinbase = StacksTransaction::new(
             TransactionVersion::Testnet,
@@ -760,7 +785,7 @@ impl<'a> TestRPC<'a> {
         );
 
         let (_, _, next_consensus_hash) = peer_1.next_burnchain_block(next_burn_ops.clone());
-        peer_2.next_burnchain_block(next_burn_ops.clone());
+        peer_2.next_burnchain_block(next_burn_ops);
 
         let view_1 = peer_1.get_burnchain_view().unwrap();
         let view_2 = peer_2.get_burnchain_view().unwrap();
@@ -846,18 +871,117 @@ impl<'a> TestRPC<'a> {
             true, true, true, true, true, true, true, true, true, true,
         ]];
 
-        let (mut peer, mut other_peers) = make_nakamoto_peers_from_invs_ext(
-            function_name!(),
-            observer,
-            bitvecs.clone(),
-            |boot_plan| {
+        let (mut peer, mut other_peers) =
+            make_nakamoto_peers_from_invs_ext(function_name!(), observer, bitvecs, |boot_plan| {
                 boot_plan
                     .with_pox_constants(10, 3)
                     .with_extra_peers(1)
                     .with_initial_balances(vec![])
                     .with_malleablized_blocks(false)
-            },
+            });
+        let mut other_peer = other_peers.pop().unwrap();
+
+        let peer_1_indexer = BitcoinIndexer::new_unit_test(&peer.config.burnchain.working_dir);
+        let peer_2_indexer =
+            BitcoinIndexer::new_unit_test(&other_peer.config.burnchain.working_dir);
+
+        let convo_1 = ConversationHttp::new(
+            format!("127.0.0.1:{}", peer.config.http_port)
+                .parse::<SocketAddr>()
+                .unwrap(),
+            Some(UrlString::try_from("http://peer1.com".to_string()).unwrap()),
+            peer.to_peer_host(),
+            &peer.config.connection_opts,
+            0,
+            32,
         );
+
+        let convo_2 = ConversationHttp::new(
+            format!("127.0.0.1:{}", other_peer.config.http_port)
+                .parse::<SocketAddr>()
+                .unwrap(),
+            Some(UrlString::try_from("http://peer2.com".to_string()).unwrap()),
+            other_peer.to_peer_host(),
+            &other_peer.config.connection_opts,
+            1,
+            32,
+        );
+
+        let tip = SortitionDB::get_canonical_burn_chain_tip(peer.sortdb().conn()).unwrap();
+        let nakamoto_tip = {
+            let sortdb = peer.sortdb.take().unwrap();
+            let tip =
+                NakamotoChainState::get_canonical_block_header(peer.chainstate().db(), &sortdb)
+                    .unwrap()
+                    .unwrap();
+            peer.sortdb = Some(sortdb);
+            tip
+        };
+
+        // sanity check
+        let other_tip =
+            SortitionDB::get_canonical_burn_chain_tip(other_peer.sortdb().conn()).unwrap();
+        let other_nakamoto_tip = {
+            let sortdb = other_peer.sortdb.take().unwrap();
+            let tip = NakamotoChainState::get_canonical_block_header(
+                other_peer.chainstate().db(),
+                &sortdb,
+            )
+            .unwrap()
+            .unwrap();
+            other_peer.sortdb = Some(sortdb);
+            tip
+        };
+
+        assert_eq!(tip, other_tip);
+        assert_eq!(nakamoto_tip, other_nakamoto_tip);
+
+        TestRPC {
+            privk1: peer.config.private_key.clone(),
+            privk2: other_peer.config.private_key.clone(),
+            peer_1: peer,
+            peer_2: other_peer,
+            peer_1_indexer,
+            peer_2_indexer,
+            convo_1,
+            convo_2,
+            canonical_tip: nakamoto_tip.index_block_hash(),
+            consensus_hash: nakamoto_tip.consensus_hash.clone(),
+            tip_hash: nakamoto_tip.anchored_header.block_hash(),
+            tip_height: nakamoto_tip.stacks_block_height,
+            microblock_tip_hash: BlockHeaderHash([0x00; 32]),
+            mempool_txids: vec![],
+            microblock_txids: vec![],
+            next_block: None,
+            next_microblock: None,
+            sendable_txs: vec![],
+            unconfirmed_state: false,
+        }
+    }
+
+    /// Set up the peers as Nakamoto nodes
+    pub fn setup_nakamoto_with_boot_plan<F>(
+        test_name: &str,
+        observer: &'a TestEventObserver,
+        boot_plan_fn: F,
+    ) -> TestRPC<'a>
+    where
+        F: FnOnce(NakamotoBootPlan) -> NakamotoBootPlan,
+    {
+        let bitvecs = vec![vec![
+            true, true, true, true, true, true, true, true, true, true,
+        ]];
+
+        let (mut peer, mut other_peers) =
+            make_nakamoto_peers_from_invs_ext(function_name!(), observer, bitvecs, |boot_plan| {
+                boot_plan_fn(
+                    boot_plan
+                        .with_pox_constants(10, 3)
+                        .with_extra_peers(1)
+                        .with_initial_balances(vec![])
+                        .with_malleablized_blocks(false),
+                )
+            });
         let mut other_peer = other_peers.pop().unwrap();
 
         let peer_1_indexer = BitcoinIndexer::new_unit_test(&peer.config.burnchain.working_dir);
@@ -939,16 +1063,20 @@ impl<'a> TestRPC<'a> {
     }
 
     pub fn run(self, requests: Vec<StacksHttpRequest>) -> Vec<StacksHttpResponse> {
-        self.run_with_observer(requests, None)
+        self.run_with_observer(requests, None, |_, _| true)
     }
 
     /// Run zero or more HTTP requests on this setup RPC test harness.
     /// Return the list of responses.
-    pub fn run_with_observer(
+    pub fn run_with_observer<F>(
         self,
         requests: Vec<StacksHttpRequest>,
         event_observer: Option<&dyn MemPoolEventDispatcher>,
-    ) -> Vec<StacksHttpResponse> {
+        wait_for: F,
+    ) -> Vec<StacksHttpResponse>
+    where
+        F: Fn(&mut TestPeer, &mut TestPeer) -> bool,
+    {
         let mut peer_1 = self.peer_1;
         let mut peer_2 = self.peer_2;
         let peer_1_indexer = self.peer_1_indexer;
@@ -958,7 +1086,14 @@ impl<'a> TestRPC<'a> {
         let unconfirmed_state = self.unconfirmed_state;
 
         let mut responses = vec![];
-        for request in requests.into_iter() {
+        for (ix, request) in requests.into_iter().enumerate() {
+            let start = Instant::now();
+            while !wait_for(&mut peer_1, &mut peer_2) {
+                if start.elapsed() > Duration::from_secs(120) {
+                    panic!("Timed out waiting for wait_for check to pass");
+                }
+                thread::sleep(Duration::from_secs(1));
+            }
             peer_1.refresh_burnchain_view();
             peer_2.refresh_burnchain_view();
 
@@ -982,7 +1117,11 @@ impl<'a> TestRPC<'a> {
             }
 
             {
-                let mut rpc_args = RPCHandlerArgs::default();
+                let mut rpc_args = peer_1
+                    .rpc_handler_args
+                    .as_ref()
+                    .map(|args_type| args_type.instantiate())
+                    .unwrap_or(RPCHandlerArgsType::make_default());
                 rpc_args.event_observer = event_observer;
                 let mut node_state = StacksNodeState::new(
                     &mut peer_1.network,
@@ -991,6 +1130,7 @@ impl<'a> TestRPC<'a> {
                     &mut peer_1_mempool,
                     &rpc_args,
                     false,
+                    peer_1.config.txindex,
                 );
                 convo_1.chat(&mut node_state).unwrap();
             }
@@ -1026,7 +1166,11 @@ impl<'a> TestRPC<'a> {
             }
 
             {
-                let mut rpc_args = RPCHandlerArgs::default();
+                let mut rpc_args = peer_2
+                    .rpc_handler_args
+                    .as_ref()
+                    .map(|args_type| args_type.instantiate())
+                    .unwrap_or(RPCHandlerArgsType::make_default());
                 rpc_args.event_observer = event_observer;
                 let mut node_state = StacksNodeState::new(
                     &mut peer_2.network,
@@ -1035,6 +1179,7 @@ impl<'a> TestRPC<'a> {
                     &mut peer_2_mempool,
                     &rpc_args,
                     false,
+                    peer_2.config.txindex,
                 );
                 convo_2.chat(&mut node_state).unwrap();
             }
@@ -1082,7 +1227,11 @@ impl<'a> TestRPC<'a> {
                     let mut peer_1_stacks_node = peer_1.stacks_node.take().unwrap();
                     let mut peer_1_mempool = peer_1.mempool.take().unwrap();
 
-                    let rpc_args = RPCHandlerArgs::default();
+                    let rpc_args = peer_1
+                        .rpc_handler_args
+                        .as_ref()
+                        .map(|args_type| args_type.instantiate())
+                        .unwrap_or(RPCHandlerArgsType::make_default());
                     let mut node_state = StacksNodeState::new(
                         &mut peer_1.network,
                         &peer_1_sortdb,
@@ -1090,6 +1239,7 @@ impl<'a> TestRPC<'a> {
                         &mut peer_1_mempool,
                         &rpc_args,
                         false,
+                        peer_1.config.txindex,
                     );
 
                     convo_1.chat(&mut node_state).unwrap();

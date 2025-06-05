@@ -17,6 +17,7 @@
 use std::collections::BTreeMap;
 use std::fmt;
 use std::mem::replace;
+use std::time::{Duration, Instant};
 
 use hashbrown::{HashMap, HashSet};
 use serde::Serialize;
@@ -181,6 +182,17 @@ pub struct EventBatch {
     pub events: Vec<StacksTransactionEvent>,
 }
 
+/** ExecutionTimeTracker keeps track of how much time a contract call is taking.
+   It is checked at every eval call.
+*/
+pub enum ExecutionTimeTracker {
+    NoTracking,
+    MaxTime {
+        start_time: Instant,
+        max_duration: Duration,
+    },
+}
+
 /** GlobalContext represents the outermost context for a single transaction's
      execution. It tracks an asset changes that occurred during the
      processing of the transaction, whether or not the current context is read_only,
@@ -199,6 +211,7 @@ pub struct GlobalContext<'a, 'hooks> {
     /// This is the chain ID of the transaction
     pub chain_id: u32,
     pub eval_hooks: Option<Vec<&'hooks mut dyn EvalHook>>,
+    pub execution_time_tracker: ExecutionTimeTracker,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -715,6 +728,10 @@ impl<'a, 'hooks> OwnedEnvironment<'a, 'hooks> {
         })
     }
 
+    pub fn is_mainnet(&self) -> bool {
+        self.context.mainnet
+    }
+
     #[cfg(any(test, feature = "testing"))]
     pub fn stx_faucet(&mut self, recipient: &PrincipalData, amount: u128) {
         self.execute_in_env::<_, _, crate::vm::errors::Error>(
@@ -793,6 +810,11 @@ impl<'a, 'hooks> OwnedEnvironment<'a, 'hooks> {
 
     pub fn get_cost_total(&self) -> ExecutionCost {
         self.context.cost_track.get_total()
+    }
+
+    #[cfg(any(test, feature = "testing"))]
+    pub fn mut_cost_tracker(&mut self) -> &mut LimitedCostTracker {
+        &mut self.context.cost_track
     }
 
     /// Destroys this environment, returning ownership of its database reference.
@@ -1544,11 +1566,19 @@ impl<'a, 'hooks> GlobalContext<'a, 'hooks> {
             epoch_id,
             chain_id,
             eval_hooks: None,
+            execution_time_tracker: ExecutionTimeTracker::NoTracking,
         }
     }
 
     pub fn is_top_level(&self) -> bool {
         self.asset_maps.is_empty()
+    }
+
+    pub fn set_max_execution_time(&mut self, max_execution_time: Duration) {
+        self.execution_time_tracker = ExecutionTimeTracker::MaxTime {
+            start_time: Instant::now(),
+            max_duration: max_execution_time,
+        }
     }
 
     fn get_asset_map(&mut self) -> Result<&mut AssetMap> {
@@ -1639,7 +1669,7 @@ impl<'a, 'hooks> GlobalContext<'a, 'hooks> {
             );
             f(&mut exec_env)
         };
-        self.roll_back().map_err(crate::vm::errors::Error::from)?;
+        self.roll_back()?;
 
         match result {
             Ok(return_value) => Ok(return_value),
@@ -2134,14 +2164,8 @@ mod test {
         mut tl_env_factory: TopLevelMemoryEnvironmentGenerator,
     ) {
         let mut env = tl_env_factory.get_env(epoch);
-        let u1 = StacksAddress {
-            version: 0,
-            bytes: Hash160([1; 20]),
-        };
-        let u2 = StacksAddress {
-            version: 0,
-            bytes: Hash160([2; 20]),
-        };
+        let u1 = StacksAddress::new(0, Hash160([1; 20])).unwrap();
+        let u2 = StacksAddress::new(0, Hash160([2; 20])).unwrap();
         // insufficient balance must be a non-includable transaction. it must error here,
         //  not simply rollback the tx and squelch the error as includable.
         let e = env

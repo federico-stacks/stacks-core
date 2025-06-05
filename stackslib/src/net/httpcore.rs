@@ -70,6 +70,9 @@ pub const STACKS_REQUEST_ID: &str = "X-Request-Id";
 /// from non-Stacks nodes (like Gaia hubs, CDNs, vanilla HTTP servers, and so on).
 pub const HTTP_REQUEST_ID_RESERVED: u32 = 0;
 
+/// The interval at which to send heartbeat logs
+const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(60);
+
 /// All representations of the `tip=` query parameter value
 #[derive(Debug, Clone, PartialEq)]
 pub enum TipRequest {
@@ -189,7 +192,7 @@ pub mod request {
         contract_key: &str,
     ) -> Result<QualifiedContractIdentifier, HttpError> {
         let address = if let Some(address_str) = captures.name(address_key) {
-            if let Some(addr) = StacksAddress::from_string(&address_str.as_str()) {
+            if let Some(addr) = StacksAddress::from_string(address_str.as_str()) {
                 addr
             } else {
                 return Err(HttpError::Http(
@@ -383,7 +386,7 @@ pub trait RPCRequestHandler: HttpRequest + HttpResponse + RPCRequestHandlerClone
     ) -> Result<BlockSnapshot, StacksHttpResponse> {
         SortitionDB::get_canonical_burn_chain_tip(sortdb.conn()).map_err(|e| {
             StacksHttpResponse::new_error(
-                &preamble,
+                preamble,
                 &HttpServerError::new(format!("Failed to load canonical burnchain tip: {:?}", &e)),
             )
         })
@@ -398,7 +401,7 @@ pub trait RPCRequestHandler: HttpRequest + HttpResponse + RPCRequestHandlerClone
     ) -> Result<StacksEpoch, StacksHttpResponse> {
         SortitionDB::get_stacks_epoch(sortdb.conn(), block_height)
             .map_err(|e| {
-                StacksHttpResponse::new_error(&preamble, &HttpServerError::new(format!("Could not load Stacks epoch for canonical burn height: {:?}", &e)))
+                StacksHttpResponse::new_error(preamble, &HttpServerError::new(format!("Could not load Stacks epoch for canonical burn height: {:?}", &e)))
             })?
             .ok_or_else(|| {
                 let msg = format!(
@@ -406,7 +409,7 @@ pub trait RPCRequestHandler: HttpRequest + HttpResponse + RPCRequestHandlerClone
                     block_height
                 );
                 warn!("{}", &msg);
-                StacksHttpResponse::new_error(&preamble, &HttpServerError::new(msg))
+                StacksHttpResponse::new_error(preamble, &HttpServerError::new(msg))
             })
     }
 
@@ -421,14 +424,14 @@ pub trait RPCRequestHandler: HttpRequest + HttpResponse + RPCRequestHandlerClone
             .map_err(|e| {
                 let msg = format!("Failed to load stacks chain tip header: {:?}", &e);
                 warn!("{}", &msg);
-                StacksHttpResponse::new_error(&preamble, &HttpServerError::new(msg))
+                StacksHttpResponse::new_error(preamble, &HttpServerError::new(msg))
             })?
             .ok_or_else(|| {
                 let msg =
                     "No stacks tip exists yet. Perhaps no blocks have been processed by this node"
                         .to_string();
                 warn!("{}", &msg);
-                StacksHttpResponse::new_error(&preamble, &HttpNotFound::new(msg))
+                StacksHttpResponse::new_error(preamble, &HttpNotFound::new(msg))
             })
     }
 }
@@ -1014,10 +1017,9 @@ impl StacksHttp {
     pub fn set_response_handler(&mut self, request_verb: &str, request_path: &str) {
         let handler_index = self
             .find_response_handler(request_verb, request_path)
-            .expect(&format!(
-                "FATAL: could not find handler for '{}' '{}'",
-                request_verb, request_path
-            ));
+            .unwrap_or_else(|| {
+                panic!("FATAL: could not find handler for '{request_verb}' '{request_path}'")
+            });
         self.request_handler_index = Some(handler_index);
     }
 
@@ -1232,25 +1234,22 @@ impl StacksHttp {
     /// This method will set up this state machine to consume the message associated with this
     /// premable, if the response is chunked.
     fn set_preamble(&mut self, preamble: &StacksHttpPreamble) -> Result<(), NetError> {
-        match preamble {
-            StacksHttpPreamble::Response(ref http_response_preamble) => {
-                // we can only receive a response if we're expecting it
-                if self.request_handler_index.is_none() && !self.allow_arbitrary_response {
-                    return Err(NetError::DeserializeError(
-                        "Unexpected HTTP response: no active request handler".to_string(),
-                    ));
-                }
-                if http_response_preamble.is_chunked() {
-                    // we can only receive one response at a time
-                    if self.reply.is_some() {
-                        test_debug!("Have pending reply already");
-                        return Err(NetError::InProgress);
-                    }
-
-                    self.set_pending(http_response_preamble);
-                }
+        if let StacksHttpPreamble::Response(ref http_response_preamble) = preamble {
+            // we can only receive a response if we're expecting it
+            if self.request_handler_index.is_none() && !self.allow_arbitrary_response {
+                return Err(NetError::DeserializeError(
+                    "Unexpected HTTP response: no active request handler".to_string(),
+                ));
             }
-            _ => {}
+            if http_response_preamble.is_chunked() {
+                // we can only receive one response at a time
+                if self.reply.is_some() {
+                    test_debug!("Have pending reply already");
+                    return Err(NetError::InProgress);
+                }
+
+                self.set_pending(http_response_preamble);
+            }
         }
         Ok(())
     }
@@ -1275,9 +1274,8 @@ impl StacksHttp {
             return Err(NetError::InvalidState);
         }
         if let Some(reply) = self.reply.as_mut() {
-            match reply.stream.consume_data(fd).map_err(|e| {
+            match reply.stream.consume_data(fd).inspect_err(|_e| {
                 self.reset();
-                e
             })? {
                 (Some((byte_vec, bytes_total)), sz) => {
                     // done receiving
@@ -1332,7 +1330,7 @@ impl StacksHttp {
     /// This can only return a finite set of identifiers, which makes it safer to use for Prometheus metrics
     /// For details see https://github.com/stacks-network/stacks-core/issues/4574
     pub fn metrics_identifier(&self, req: &mut StacksHttpRequest) -> &str {
-        let Ok((decoded_path, _)) = decode_request_path(&req.request_path()) else {
+        let Ok((decoded_path, _)) = decode_request_path(req.request_path()) else {
             return "<err-url-decode>";
         };
 
@@ -1385,7 +1383,7 @@ impl StacksHttp {
                 )),
             }
         } else {
-            let (message, _) = http.read_payload(&preamble, &message_bytes)?;
+            let (message, _) = http.read_payload(&preamble, message_bytes)?;
             Ok(message)
         }
     }
@@ -1491,11 +1489,11 @@ impl ProtocolFamily for StacksHttp {
                 }
 
                 // message of unknown length.  Buffer up and maybe we can parse it.
-                let (message_bytes_opt, num_read) =
-                    self.consume_data(http_response_preamble, fd).map_err(|e| {
-                        self.reset();
-                        e
-                    })?;
+                let (message_bytes_opt, num_read) = self
+                    .consume_data(http_response_preamble, fd)
+                    .inspect_err(|_e| {
+                    self.reset();
+                })?;
 
                 match message_bytes_opt {
                     Some((message_bytes, total_bytes_consumed)) => {
@@ -1781,7 +1779,7 @@ fn handle_net_error(e: NetError, msg: &str) -> io::Error {
     match e {
         NetError::ReadError(ioe) | NetError::WriteError(ioe) => ioe,
         NetError::RecvTimeout => io::Error::new(io::ErrorKind::WouldBlock, "recv timeout"),
-        _ => io::Error::new(io::ErrorKind::Other, format!("{}: {:?}", &e, msg).as_str()),
+        _ => io::Error::other(format!("{e}: {msg:?}").as_str()),
     }
 }
 
@@ -1817,10 +1815,7 @@ pub fn send_http_request(
     }
 
     let Some((mut stream, addr)) = stream_and_addr else {
-        return Err(last_err.unwrap_or(io::Error::new(
-            io::ErrorKind::Other,
-            "Unable to connect to {host}:{port}",
-        )));
+        return Err(last_err.unwrap_or(io::Error::other("Unable to connect to {host}:{port}")));
     };
 
     stream.set_read_timeout(Some(timeout))?;
@@ -1828,8 +1823,8 @@ pub fn send_http_request(
     stream.set_nodelay(true)?;
 
     let start = Instant::now();
-
-    debug!("send_request: Sending request"; "request" => %request.request_path());
+    let request_path = request.request_path();
+    debug!("send_request: Sending request"; "request" => request_path);
 
     // Some explanation of what's going on here is in order.
     //
@@ -1872,10 +1867,7 @@ pub fn send_http_request(
     let mut request_handle = connection
         .make_request_handle(0, get_epoch_time_secs() + timeout.as_secs(), 0)
         .map_err(|e| {
-            io::Error::new(
-                io::ErrorKind::Other,
-                format!("Failed to create request handle: {:?}", &e).as_str(),
-            )
+            io::Error::other(format!("Failed to create request handle: {e:?}").as_str())
         })?;
 
     // Step 3: load up the request with the message we're gonna send, and iteratively dump its
@@ -1887,6 +1879,7 @@ pub fn send_http_request(
         .map_err(|e| handle_net_error(e, "Failed to serialize request body"))?;
 
     debug!("send_request(sending data)");
+    let mut last_heartbeat_time = start; // Initialize heartbeat timer for sending loop
     loop {
         let flushed = request_handle
             .try_flush()
@@ -1905,11 +1898,18 @@ pub fn send_http_request(
             break;
         }
 
-        if Instant::now().saturating_duration_since(start) > timeout {
+        if start.elapsed() >= timeout {
             return Err(io::Error::new(
                 io::ErrorKind::WouldBlock,
-                "Timed out while receiving request",
+                "Timed out while sending request",
             ));
+        }
+        if last_heartbeat_time.elapsed() >= HEARTBEAT_INTERVAL {
+            info!(
+                "send_request(sending data): heartbeat - still sending request to {} path='{}' (elapsed: {:?})",
+                addr, request_path, start.elapsed()
+            );
+            last_heartbeat_time = Instant::now();
         }
     }
 
@@ -1917,6 +1917,7 @@ pub fn send_http_request(
     // and dispatched any new messages to the request handle.  If so, then extract the message and
     // check that it's a well-formed HTTP response.
     debug!("send_request(receiving data)");
+    last_heartbeat_time = Instant::now();
     let response = loop {
         // get back the reply
         debug!("send_request(receiving data): try to receive data");
@@ -1949,11 +1950,18 @@ pub fn send_http_request(
         };
         request_handle = rh;
 
-        if Instant::now().saturating_duration_since(start) > timeout {
+        if start.elapsed() >= timeout {
             return Err(io::Error::new(
                 io::ErrorKind::WouldBlock,
-                "Timed out while receiving request",
+                "Timed out while receiving response",
             ));
+        }
+        if last_heartbeat_time.elapsed() >= HEARTBEAT_INTERVAL {
+            info!(
+                "send_request(receiving data): heartbeat - still receiving response from {} path='{}' (elapsed: {:?})",
+                addr, request_path, start.elapsed()
+            );
+            last_heartbeat_time = Instant::now();
         }
     };
 
@@ -1965,18 +1973,14 @@ pub fn send_http_request(
             let path = &request.preamble().path_and_query_str;
             let resp_status_code = response.preamble().status_code;
             let resp_body = response.body();
-            return Err(io::Error::new(
-                io::ErrorKind::Other,
+            return Err(io::Error::other(
                 format!(
                     "HTTP '{verb} {path}' did not succeed ({resp_status_code} != 200). Response body = {resp_body:?}"
                 ),
             ));
         }
         _ => {
-            return Err(io::Error::new(
-                io::ErrorKind::Other,
-                "Did not receive an HTTP response",
-            ));
+            return Err(io::Error::other("Did not receive an HTTP response"));
         }
     };
 

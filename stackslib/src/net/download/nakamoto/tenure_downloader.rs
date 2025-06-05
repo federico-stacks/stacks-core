@@ -57,7 +57,7 @@ use crate::net::inv::epoch2x::InvState;
 use crate::net::inv::nakamoto::{NakamotoInvStateMachine, NakamotoTenureInv};
 use crate::net::neighbors::rpc::NeighborRPC;
 use crate::net::neighbors::NeighborComms;
-use crate::net::p2p::{CurrentRewardSet, PeerNetwork};
+use crate::net::p2p::{CurrentRewardSet, DropReason, DropSource, PeerNetwork};
 use crate::net::server::HttpPeer;
 use crate::net::{Error as NetError, Neighbor, NeighborAddress, NeighborKey};
 use crate::util_lib::db::{DBConn, Error as DBError};
@@ -149,6 +149,8 @@ pub struct NakamotoTenureDownloader {
     pub tenure_end_block: Option<NakamotoBlock>,
     /// Tenure blocks
     pub tenure_blocks: Option<Vec<NakamotoBlock>>,
+    /// Whether this tenure is unconfirmed
+    pub is_tenure_unconfirmed: bool,
 }
 
 impl NakamotoTenureDownloader {
@@ -161,6 +163,7 @@ impl NakamotoTenureDownloader {
         naddr: NeighborAddress,
         start_signer_keys: RewardSet,
         end_signer_keys: RewardSet,
+        is_tenure_unconfirmed: bool,
     ) -> Self {
         debug!(
             "Instantiate downloader to {}-{} for tenure {}: {}-{}",
@@ -187,6 +190,7 @@ impl NakamotoTenureDownloader {
             tenure_start_block: None,
             tenure_end_block: None,
             tenure_blocks: None,
+            is_tenure_unconfirmed,
         }
     }
 
@@ -745,7 +749,12 @@ impl NakamotoTenureDownloader {
 
         let Some(peerhost) = NeighborRPC::get_peer_host(network, &self.naddr) else {
             // no conversation open to this neighbor
-            neighbor_rpc.add_dead(network, &self.naddr);
+            neighbor_rpc.add_dead(
+                network,
+                &self.naddr,
+                DropReason::DeadConnection("No authenticated connection open".into()),
+                DropSource::NakamotoTenureDownloader,
+            );
             return Err(NetError::PeerNotConnected);
         };
 
@@ -781,9 +790,8 @@ impl NakamotoTenureDownloader {
                     &block_id,
                     get_epoch_time_ms().saturating_sub(start_request_time)
                 );
-                let block = response.decode_nakamoto_block().map_err(|e| {
-                    warn!("Failed to decode response for a Nakamoto block: {:?}", &e);
-                    e
+                let block = response.decode_nakamoto_block().inspect_err(|e| {
+                    warn!("Failed to decode response for a Nakamoto block: {e:?}")
                 })?;
                 self.try_accept_tenure_start_block(block)?;
                 Ok(None)
@@ -794,9 +802,8 @@ impl NakamotoTenureDownloader {
                     &block_id,
                     get_epoch_time_ms().saturating_sub(start_request_time)
                 );
-                let block = response.decode_nakamoto_block().map_err(|e| {
-                    warn!("Failed to decode response for a Nakamoto block: {:?}", &e);
-                    e
+                let block = response.decode_nakamoto_block().inspect_err(|e| {
+                    warn!("Failed to decode response for a Nakamoto block: {e:?}")
                 })?;
                 self.try_accept_tenure_end_block(&block)?;
                 Ok(None)
@@ -807,9 +814,8 @@ impl NakamotoTenureDownloader {
                     &end_block_id,
                     get_epoch_time_ms().saturating_sub(start_request_time)
                 );
-                let blocks = response.decode_nakamoto_tenure().map_err(|e| {
-                    warn!("Failed to decode response for a Nakamoto tenure: {:?}", &e);
-                    e
+                let blocks = response.decode_nakamoto_tenure().inspect_err(|e| {
+                    warn!("Failed to decode response for a Nakamoto tenure: {e:?}")
                 })?;
                 let blocks_opt = self.try_accept_tenure_blocks(blocks)?;
                 Ok(blocks_opt)

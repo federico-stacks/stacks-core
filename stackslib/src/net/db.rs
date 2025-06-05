@@ -103,29 +103,17 @@ pub struct LocalPeer {
 
 impl fmt::Display for LocalPeer {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(
-            f,
-            "local.{:x}://(bind={:?})(pub={:?})",
-            self.network_id,
-            &self.addrbytes.to_socketaddr(self.port),
-            &self
-                .public_ip_address
-                .map(|(ref addrbytes, ref port)| addrbytes.to_socketaddr(*port))
-        )
+        write!(f, "local::{}", self.port)?;
+        match &self.public_ip_address {
+            None => Ok(()),
+            Some((addr, port)) => write!(f, "::pub={}", addr.to_socketaddr(*port)),
+        }
     }
 }
 
 impl fmt::Debug for LocalPeer {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(
-            f,
-            "local.{:x}://(bind={:?})(pub={:?})",
-            self.network_id,
-            &self.addrbytes.to_socketaddr(self.port),
-            &self
-                .public_ip_address
-                .map(|(ref addrbytes, ref port)| addrbytes.to_socketaddr(*port))
-        )
+        write!(f, "{self}")
     }
 }
 
@@ -140,7 +128,7 @@ impl LocalPeer {
         data_url: UrlString,
         stacker_dbs: Vec<QualifiedContractIdentifier>,
     ) -> LocalPeer {
-        let mut pkey = privkey.unwrap_or(Secp256k1PrivateKey::new());
+        let mut pkey = privkey.unwrap_or(Secp256k1PrivateKey::random());
         pkey.set_compress_public(true);
 
         let mut rng = thread_rng();
@@ -158,7 +146,7 @@ impl LocalPeer {
             "Will be authenticating p2p messages with the following";
             "public key" => &Secp256k1PublicKey::from_private(&pkey).to_hex(),
             "services" => &to_hex(&services.to_be_bytes()),
-            "Stacker DBs" => stacker_dbs.iter().map(|cid| format!("{}", &cid)).collect::<Vec<String>>().join(",")
+            "Stacker DBs" => stacker_dbs.iter().map(|cid| cid.to_string()).collect::<Vec<String>>().join(",")
         );
 
         LocalPeer {
@@ -485,7 +473,7 @@ impl PeerDB {
         }
 
         for asn4 in asn4_entries {
-            PeerDB::asn4_insert(&tx, &asn4)?;
+            PeerDB::asn4_insert(&tx, asn4)?;
         }
 
         for neighbor in initial_neighbors {
@@ -673,7 +661,7 @@ impl PeerDB {
         if create_flag {
             // instantiate!
             match initial_neighbors {
-                Some(ref neighbors) => {
+                Some(neighbors) => {
                     db.instantiate(
                         network_id,
                         parent_network_id,
@@ -823,8 +811,8 @@ impl PeerDB {
 
     /// Read the local peer record
     pub fn get_local_peer(conn: &DBConn) -> Result<LocalPeer, db_error> {
-        let qry = "SELECT * FROM local_peer LIMIT 1".to_string();
-        let rows = query_rows::<LocalPeer, _>(conn, &qry, NO_PARAMS)?;
+        let qry = "SELECT * FROM local_peer LIMIT 1";
+        let rows = query_rows::<LocalPeer, _>(conn, qry, NO_PARAMS)?;
 
         match rows.len() {
             1 => Ok(rows[0].clone()),
@@ -880,7 +868,7 @@ impl PeerDB {
             return Err(db_error::Overflow);
         }
 
-        let new_key = Secp256k1PrivateKey::new();
+        let new_key = Secp256k1PrivateKey::random();
         {
             let tx = self.tx_begin()?;
 
@@ -979,7 +967,7 @@ impl PeerDB {
     ) -> Result<bool, db_error> {
         let qry = "SELECT 1 FROM frontier WHERE network_id = ?1 AND addrbytes = ?2 AND port = ?3";
         let args = params![network_id, peer_addr.to_bin(), peer_port];
-        Ok(query_row::<i64, _>(conn, &qry, args)?
+        Ok(query_row::<i64, _>(conn, qry, args)?
             .map(|x| x == 1)
             .unwrap_or(false))
     }
@@ -1006,14 +994,14 @@ impl PeerDB {
         let args = params![network_id, slot];
 
         // N.B. we don't use Self::query_peer() here because `slot` is the primary key
-        query_row::<Neighbor, _>(conn, &qry, args)
+        query_row::<Neighbor, _>(conn, qry, args)
     }
 
     /// Is there any peer at a particular slot?
     pub fn has_peer_at(conn: &DBConn, network_id: u32, slot: u32) -> Result<bool, db_error> {
         let qry = "SELECT 1 FROM frontier WHERE network_id = ?1 AND slot = ?2";
         let args = params![network_id, slot];
-        Ok(query_row::<i64, _>(conn, &qry, args)?
+        Ok(query_row::<i64, _>(conn, qry, args)?
             .map(|x| x == 1)
             .unwrap_or(false))
     }
@@ -1036,7 +1024,7 @@ impl PeerDB {
                 return Ok(false);
             }
             None => {
-                if PeerDB::is_address_denied(conn, &peer_addr)? {
+                if PeerDB::is_address_denied(conn, peer_addr)? {
                     return Ok(true);
                 }
                 return Ok(false);
@@ -1205,7 +1193,7 @@ impl PeerDB {
         peer_addr: &PeerAddress,
         peer_port: u16,
     ) -> Result<(), db_error> {
-        tx.execute("UPDATE frontier SET initial = 1 WHERE network_id = ?1 AND addrbytes = ?2 AND port = ?3", 
+        tx.execute("UPDATE frontier SET initial = 1 WHERE network_id = ?1 AND addrbytes = ?2 AND port = ?3",
                     params![network_id, peer_addr.to_bin(), peer_port])
             .map_err(db_error::SqliteError)?;
 
@@ -1241,7 +1229,7 @@ impl PeerDB {
                 addrbytes: peer_addr.clone(),
                 port: peer_port,
             };
-            let empty_key = StacksPublicKey::from_private(&StacksPrivateKey::new());
+            let empty_key = StacksPublicKey::from_private(&StacksPrivateKey::random());
             let mut empty_neighbor = Neighbor::empty(&nk, &empty_key, 0);
 
             empty_neighbor.allowed = allow_deadline;
@@ -1287,7 +1275,7 @@ impl PeerDB {
                 addrbytes: peer_addr.clone(),
                 port: peer_port,
             };
-            let empty_key = StacksPublicKey::from_private(&StacksPrivateKey::new());
+            let empty_key = StacksPublicKey::from_private(&StacksPrivateKey::random());
             let mut empty_neighbor = Neighbor::empty(&nk, &empty_key, 0);
 
             empty_neighbor.denied = deny_deadline as i64;
@@ -1447,8 +1435,7 @@ impl PeerDB {
         let cur_dbs_set: HashSet<_> = PeerDB::static_get_peer_stacker_dbs(tx, neighbor)?
             .into_iter()
             .collect();
-        let new_dbs_set: HashSet<QualifiedContractIdentifier> =
-            dbs.iter().map(|cid| cid.clone()).collect();
+        let new_dbs_set: HashSet<QualifiedContractIdentifier> = dbs.iter().cloned().collect();
         let to_insert: Vec<_> = new_dbs_set.difference(&cur_dbs_set).collect();
         let to_delete: Vec<_> = cur_dbs_set.difference(&new_dbs_set).collect();
 
@@ -1662,6 +1649,7 @@ impl PeerDB {
         conn: &DBConn,
         network_id: u32,
         network_epoch: u8,
+        peer_version: u32,
         count: u32,
         block_height: u64,
         always_include_allowed: bool,
@@ -1670,6 +1658,7 @@ impl PeerDB {
             conn,
             network_id,
             network_epoch,
+            peer_version,
             0,
             count,
             block_height,
@@ -1683,6 +1672,7 @@ impl PeerDB {
         conn: &DBConn,
         network_id: u32,
         network_epoch: u8,
+        peer_version: u32,
         min_age: u64,
         count: u32,
         block_height: u64,
@@ -1693,17 +1683,29 @@ impl PeerDB {
 
         // UTC time
         let now_secs = util::get_epoch_time_secs();
+        // Extract the epoch from the peer_version. The epoch is stored in the last byte.
+        let node_peer_version = peer_version & 0x000000ff;
 
         if always_include_allowed {
             // always include allowed neighbors, freshness be damned
-            let allow_qry = "SELECT * FROM frontier WHERE network_id = ?1 AND denied < ?2 AND (allowed < 0 OR ?3 < allowed) AND (peer_version & 0x000000ff) >= ?4";
+            // the peer_version check mirrors the check in `has_acceptable_epoch`:
+            //    (my_epoch <= peer_epoch) OR (curr_epoch <= peer_epoch)
+            let allow_qry = r#"
+                SELECT *
+                FROM frontier
+                WHERE network_id = ?1
+                  AND denied < ?2
+                  AND (allowed < 0 OR ?3 < allowed)
+                  AND (?4 <= (peer_version & 0x000000ff) OR ?5 <= (peer_version & 0x000000ff))"#;
+
             let allow_args = params![
                 network_id,
                 u64_to_sql(now_secs)?,
                 u64_to_sql(now_secs)?,
+                node_peer_version,
                 network_epoch,
             ];
-            let mut allow_rows = Self::query_peers(conn, &allow_qry, allow_args)?;
+            let mut allow_rows = Self::query_peers(conn, allow_qry, allow_args)?;
 
             if allow_rows.len() >= (count as usize) {
                 // return a random subset
@@ -1717,17 +1719,33 @@ impl PeerDB {
         if (ret.len() as u32) >= count {
             return Ok(ret);
         }
+        // In case we don't have enough allowed peers, fill in also with non-allowed, randomly-chosen, fresh peers
 
-        // fill in with non-allowed, randomly-chosen, fresh peers
-        let use_public = if public_only { "AND public = 1" } else { "" };
+        // only include public peers if requested
+        let use_public_condition = if public_only { "AND public = 1" } else { "" };
 
-        let random_peers_qry = if always_include_allowed {
-            format!("SELECT * FROM frontier WHERE network_id = ?1 AND last_contact_time >= ?2 AND ?3 < expire_block_height AND denied < ?4 AND \
-                 (allowed >= 0 AND allowed <= ?5) AND (peer_version & 0x000000ff) >= ?6 {use_public} ORDER BY RANDOM() LIMIT ?7")
+        // If always_include_allowed is true, we've already collected all allowed peers above,
+        // so exclude them from this query to avoid duplicates
+        let include_allowed_condition = if always_include_allowed {
+            "AND (allowed >= 0 AND allowed <= ?5)"
         } else {
-            format!("SELECT * FROM frontier WHERE network_id = ?1 AND last_contact_time >= ?2 AND ?3 < expire_block_height AND denied < ?4 AND \
-                 (allowed < 0 OR (allowed >= 0 AND allowed <= ?5)) AND (peer_version & 0x000000ff) >= ?6 {use_public} ORDER BY RANDOM() LIMIT ?7")
+            ""
         };
+
+        let random_peers_qry = format!(
+            r#"
+            SELECT *
+            FROM frontier
+            WHERE network_id = ?1
+              AND last_contact_time >= ?2
+              AND ?3 < expire_block_height
+              AND denied < ?4
+              {include_allowed_condition}
+              AND (?6 <= (peer_version & 0x000000ff) OR ?7 <= (peer_version & 0x000000ff))
+              {use_public_condition}
+            ORDER BY RANDOM()
+            LIMIT ?8"#
+        );
 
         let random_peers_args = params![
             network_id,
@@ -1735,6 +1753,7 @@ impl PeerDB {
             u64_to_sql(block_height)?,
             u64_to_sql(now_secs)?,
             u64_to_sql(now_secs)?,
+            node_peer_version,
             network_epoch,
             (count - (ret.len() as u32)),
         ];
@@ -1752,10 +1771,55 @@ impl PeerDB {
         conn: &DBConn,
         network_id: u32,
         network_epoch: u8,
+        peer_version: u32,
         count: u32,
         block_height: u64,
     ) -> Result<Vec<Neighbor>, db_error> {
-        PeerDB::get_random_neighbors(conn, network_id, network_epoch, count, block_height, true)
+        PeerDB::get_random_neighbors(
+            conn,
+            network_id,
+            network_epoch,
+            peer_version,
+            count,
+            block_height,
+            true,
+        )
+    }
+
+    pub fn get_valid_initial_neighbors(
+        conn: &DBConn,
+        network_id: u32,
+        network_epoch: u8,
+        peer_version: u32,
+        burn_block_height: u64,
+    ) -> Result<Vec<Neighbor>, db_error> {
+        // UTC time
+        let now_secs = util::get_epoch_time_secs();
+        // Extract the epoch from the peer_version. The epoch is stored in the last byte.
+        let node_peer_version = peer_version & 0x000000ff;
+
+        // the peer_version check mirrors the check in `has_acceptable_epoch`:
+        //    (my_epoch <= peer_epoch) OR (curr_epoch <= peer_epoch)
+        let query = r#"
+            SELECT *
+            FROM frontier
+            WHERE initial = 1
+              AND (allowed < 0 OR ?1 < allowed)
+              AND network_id = ?2
+              AND denied < ?3
+              AND ?4 < expire_block_height
+              AND (?5 <= (peer_version & 0x000000ff) OR ?6 <= (peer_version & 0x000000ff))"#;
+
+        let args = params![
+            u64_to_sql(now_secs)?,
+            network_id,
+            u64_to_sql(now_secs)?,
+            u64_to_sql(burn_block_height)?,
+            node_peer_version,
+            network_epoch,
+        ];
+
+        Self::query_peers(conn, query, args)
     }
 
     /// Get a randomized set of peers for walking the peer graph.
@@ -1766,6 +1830,7 @@ impl PeerDB {
         conn: &DBConn,
         network_id: u32,
         network_epoch: u8,
+        peer_version: u32,
         min_age: u64,
         count: u32,
         block_height: u64,
@@ -1774,6 +1839,7 @@ impl PeerDB {
             conn,
             network_id,
             network_epoch,
+            peer_version,
             min_age,
             count,
             block_height,
@@ -1807,7 +1873,7 @@ impl PeerDB {
 
         let qry = "SELECT * FROM asn4 WHERE prefix = (?1 & ~((1 << (32 - mask)) - 1)) ORDER BY prefix DESC LIMIT 1";
         let args = params![addr_u32];
-        let rows = query_rows::<ASEntry4, _>(conn, &qry, args)?;
+        let rows = query_rows::<ASEntry4, _>(conn, qry, args)?;
         match rows.len() {
             0 => Ok(None),
             _ => Ok(Some(rows[0].asn)),
@@ -1830,20 +1896,20 @@ impl PeerDB {
     pub fn asn_count(conn: &DBConn, asn: u32) -> Result<u64, db_error> {
         let qry = "SELECT COUNT(*) FROM frontier WHERE asn = ?1";
         let args = params![asn];
-        let count = query_count(conn, &qry, args)?;
+        let count = query_count(conn, qry, args)?;
         Ok(count as u64)
     }
 
     #[cfg_attr(test, mutants::skip)]
     pub fn get_frontier_size(conn: &DBConn) -> Result<u64, db_error> {
         let qry = "SELECT COUNT(*) FROM frontier";
-        let count = query_count(conn, &qry, NO_PARAMS)?;
+        let count = query_count(conn, qry, NO_PARAMS)?;
         Ok(count as u64)
     }
 
     pub fn get_all_peers(conn: &DBConn) -> Result<Vec<Neighbor>, db_error> {
         let qry = "SELECT * FROM frontier ORDER BY addrbytes ASC, port ASC";
-        let rows = Self::query_peers(conn, &qry, NO_PARAMS)?;
+        let rows = Self::query_peers(conn, qry, NO_PARAMS)?;
         Ok(rows)
     }
 
@@ -1874,12 +1940,18 @@ impl PeerDB {
 
 #[cfg(any(test, feature = "testing"))]
 mod test {
+    use std::collections::HashSet;
+
     use clarity::vm::types::{StacksAddressExtensions, StandardPrincipalData};
     use stacks_common::types::chainstate::StacksAddress;
     use stacks_common::types::net::{PeerAddress, PeerHost};
     use stacks_common::util::hash::Hash160;
 
     use super::*;
+    use crate::core::{
+        NETWORK_ID_MAINNET, PEER_VERSION_EPOCH_2_0, PEER_VERSION_EPOCH_3_0, PEER_VERSION_EPOCH_3_1,
+        PEER_VERSION_TESTNET_MAJOR,
+    };
     use crate::net::{Neighbor, NeighborKey};
 
     impl PeerDB {
@@ -1924,11 +1996,11 @@ mod test {
 
         let mut stackerdbs = vec![
             QualifiedContractIdentifier::new(
-                StandardPrincipalData(0x01, [0x02; 20]),
+                StandardPrincipalData::new(0x01, [0x02; 20]).unwrap(),
                 "db-1".into(),
             ),
             QualifiedContractIdentifier::new(
-                StandardPrincipalData(0x02, [0x03; 20]),
+                StandardPrincipalData::new(0x02, [0x03; 20]).unwrap(),
                 "db-2".into(),
             ),
         ];
@@ -2097,11 +2169,11 @@ mod test {
         // basic storage and retrieval
         let mut stackerdbs = vec![
             QualifiedContractIdentifier::new(
-                StandardPrincipalData(0x01, [0x02; 20]),
+                StandardPrincipalData::new(0x01, [0x02; 20]).unwrap(),
                 "db-1".into(),
             ),
             QualifiedContractIdentifier::new(
-                StandardPrincipalData(0x02, [0x03; 20]),
+                StandardPrincipalData::new(0x02, [0x03; 20]).unwrap(),
                 "db-2".into(),
             ),
         ];
@@ -2127,11 +2199,11 @@ mod test {
         // adding DBs to the same slot just grows the total list
         let mut new_stackerdbs = vec![
             QualifiedContractIdentifier::new(
-                StandardPrincipalData(0x03, [0x04; 20]),
+                StandardPrincipalData::new(0x03, [0x04; 20]).unwrap(),
                 "db-3".into(),
             ),
             QualifiedContractIdentifier::new(
-                StandardPrincipalData(0x04, [0x05; 20]),
+                StandardPrincipalData::new(0x04, [0x05; 20]).unwrap(),
                 "db-5".into(),
             ),
         ];
@@ -2207,7 +2279,7 @@ mod test {
             let res = PeerDB::try_insert_peer(&tx, &neighbor, &[]).unwrap();
             tx.commit().unwrap();
 
-            assert_eq!(res, true);
+            assert!(res);
         }
 
         let neighbor_opt = PeerDB::get_peer(
@@ -2228,7 +2300,7 @@ mod test {
             let res = PeerDB::try_insert_peer(&tx, &neighbor, &[]).unwrap();
             tx.commit().unwrap();
 
-            assert_eq!(res, true);
+            assert!(res);
         }
 
         // put a peer in all the slots
@@ -2253,7 +2325,7 @@ mod test {
             let res = PeerDB::try_insert_peer(&tx, &neighbor, &[]).unwrap();
             tx.commit().unwrap();
 
-            assert_eq!(res, true);
+            assert!(res);
         }
 
         // put neighbor at new_neighbor's slots
@@ -2276,7 +2348,7 @@ mod test {
             let res = PeerDB::try_insert_peer(&tx, &new_neighbor, &[]).unwrap();
             tx.commit().unwrap();
 
-            assert_eq!(res, false);
+            assert!(!res);
         }
     }
 
@@ -2308,7 +2380,7 @@ mod test {
             out_degree: 1,
         };
 
-        let key1 = Secp256k1PrivateKey::new();
+        let key1 = Secp256k1PrivateKey::random();
 
         let path = "/tmp/test-peerdb-try_insert_peer_with_stackerdbs.db".to_string();
         if fs::metadata(&path).is_ok() {
@@ -2332,11 +2404,11 @@ mod test {
 
         let mut stackerdbs = vec![
             QualifiedContractIdentifier::new(
-                StandardPrincipalData(0x01, [0x02; 20]),
+                StandardPrincipalData::new(0x01, [0x02; 20]).unwrap(),
                 "db-1".into(),
             ),
             QualifiedContractIdentifier::new(
-                StandardPrincipalData(0x02, [0x03; 20]),
+                StandardPrincipalData::new(0x02, [0x03; 20]).unwrap(),
                 "db-2".into(),
             ),
         ];
@@ -2347,7 +2419,7 @@ mod test {
             let res = PeerDB::try_insert_peer(&tx, &neighbor, &stackerdbs).unwrap();
             tx.commit().unwrap();
 
-            assert_eq!(res, true);
+            assert!(res);
         }
 
         let neighbor_opt = PeerDB::get_peer(
@@ -2369,11 +2441,11 @@ mod test {
         // insert new stacker DBs -- keep one the same, and add a different one
         let mut changed_stackerdbs = vec![
             QualifiedContractIdentifier::new(
-                StandardPrincipalData(0x01, [0x02; 20]),
+                StandardPrincipalData::new(0x01, [0x02; 20]).unwrap(),
                 "db-1".into(),
             ),
             QualifiedContractIdentifier::new(
-                StandardPrincipalData(0x03, [0x04; 20]),
+                StandardPrincipalData::new(0x03, [0x04; 20]).unwrap(),
                 "db-3".into(),
             ),
         ];
@@ -2385,7 +2457,7 @@ mod test {
             tx.commit().unwrap();
 
             // peer already present
-            assert_eq!(res, true);
+            assert!(res);
         }
 
         let mut neighbor_stackerdbs = db.get_peer_stacker_dbs(&neighbor).unwrap();
@@ -2399,7 +2471,7 @@ mod test {
             tx.commit().unwrap();
 
             // peer already present
-            assert_eq!(res, true);
+            assert!(res);
         }
 
         let mut neighbor_stackerdbs = db.get_peer_stacker_dbs(&neighbor).unwrap();
@@ -2409,11 +2481,11 @@ mod test {
         // add back stacker DBs
         let mut new_stackerdbs = vec![
             QualifiedContractIdentifier::new(
-                StandardPrincipalData(0x04, [0x05; 20]),
+                StandardPrincipalData::new(0x04, [0x05; 20]).unwrap(),
                 "db-4".into(),
             ),
             QualifiedContractIdentifier::new(
-                StandardPrincipalData(0x05, [0x06; 20]),
+                StandardPrincipalData::new(0x05, [0x06; 20]).unwrap(),
                 "db-5".into(),
             ),
         ];
@@ -2425,7 +2497,7 @@ mod test {
             tx.commit().unwrap();
 
             // peer already present
-            assert_eq!(res, true);
+            assert!(res);
         }
 
         let mut neighbor_stackerdbs = db.get_peer_stacker_dbs(&neighbor).unwrap();
@@ -2437,11 +2509,11 @@ mod test {
         for _ in 0..2 {
             let mut replace_stackerdbs = vec![
                 QualifiedContractIdentifier::new(
-                    StandardPrincipalData(0x06, [0x07; 20]),
+                    StandardPrincipalData::new(0x06, [0x07; 20]).unwrap(),
                     "db-6".into(),
                 ),
                 QualifiedContractIdentifier::new(
-                    StandardPrincipalData(0x07, [0x08; 20]),
+                    StandardPrincipalData::new(0x07, [0x08; 20]).unwrap(),
                     "db-7".into(),
                 ),
             ];
@@ -2453,7 +2525,7 @@ mod test {
                 tx.commit().unwrap();
 
                 // peer already present
-                assert_eq!(res, true);
+                assert!(res);
             }
 
             let mut neighbor_stackerdbs = db.get_peer_stacker_dbs(&neighbor).unwrap();
@@ -2478,7 +2550,7 @@ mod test {
         }
 
         let deleted_stackerdbs = db.get_peer_stacker_dbs(&neighbor).unwrap();
-        assert_eq!(deleted_stackerdbs.len(), 0);
+        assert!(deleted_stackerdbs.is_empty());
     }
 
     /// Test PeerDB::find_stacker_db_replicas().  Verifies that we can find a list of neighbors
@@ -2509,7 +2581,7 @@ mod test {
             out_degree: 1,
         };
 
-        let key1 = Secp256k1PrivateKey::new();
+        let key1 = Secp256k1PrivateKey::random();
 
         let path = "/tmp/test-peerdb-find_stacker_db_replicas.db".to_string();
         if fs::metadata(&path).is_ok() {
@@ -2533,11 +2605,11 @@ mod test {
 
         let mut stackerdbs = vec![
             QualifiedContractIdentifier::new(
-                StandardPrincipalData(0x01, [0x02; 20]),
+                StandardPrincipalData::new(0x01, [0x02; 20]).unwrap(),
                 "db-1".into(),
             ),
             QualifiedContractIdentifier::new(
-                StandardPrincipalData(0x02, [0x03; 20]),
+                StandardPrincipalData::new(0x02, [0x03; 20]).unwrap(),
                 "db-2".into(),
             ),
         ];
@@ -2548,7 +2620,7 @@ mod test {
             let res = PeerDB::try_insert_peer(&tx, &neighbor, &stackerdbs).unwrap();
             tx.commit().unwrap();
 
-            assert_eq!(res, true);
+            assert!(res);
         }
 
         let replicas =
@@ -2563,20 +2635,20 @@ mod test {
 
         let replicas =
             PeerDB::find_stacker_db_replicas(&db.conn, 0x9abcdef0, &stackerdbs[0], 0, 0).unwrap();
-        assert_eq!(replicas.len(), 0);
+        assert!(replicas.is_empty());
 
         let replicas =
             PeerDB::find_stacker_db_replicas(&db.conn, 0x9abcdef1, &stackerdbs[0], 0, 1).unwrap();
-        assert_eq!(replicas.len(), 0);
+        assert!(replicas.is_empty());
 
         // insert new stacker DBs -- keep one the same, and add a different one
         let mut changed_stackerdbs = vec![
             QualifiedContractIdentifier::new(
-                StandardPrincipalData(0x01, [0x02; 20]),
+                StandardPrincipalData::new(0x01, [0x02; 20]).unwrap(),
                 "db-1".into(),
             ),
             QualifiedContractIdentifier::new(
-                StandardPrincipalData(0x03, [0x04; 20]),
+                StandardPrincipalData::new(0x03, [0x04; 20]).unwrap(),
                 "db-3".into(),
             ),
         ];
@@ -2588,7 +2660,7 @@ mod test {
             tx.commit().unwrap();
 
             // peer already present, and we were able to update
-            assert_eq!(res, true);
+            assert!(res);
         }
 
         let mut neighbor_stackerdbs = db.get_peer_stacker_dbs(&neighbor).unwrap();
@@ -2638,7 +2710,7 @@ mod test {
             1,
         )
         .unwrap();
-        assert_eq!(replicas.len(), 0);
+        assert!(replicas.is_empty());
 
         // clear stacker DBs
         {
@@ -2647,7 +2719,7 @@ mod test {
             tx.commit().unwrap();
 
             // peer already present, and we were able to update
-            assert_eq!(res, true);
+            assert!(res);
         }
 
         let mut neighbor_stackerdbs = db.get_peer_stacker_dbs(&neighbor).unwrap();
@@ -2657,20 +2729,20 @@ mod test {
         let replicas =
             PeerDB::find_stacker_db_replicas(&db.conn, 0x9abcdef0, &changed_stackerdbs[0], 0, 1)
                 .unwrap();
-        assert_eq!(replicas.len(), 0);
+        assert!(replicas.is_empty());
 
         let replicas =
             PeerDB::find_stacker_db_replicas(&db.conn, 0x9abcdef0, &changed_stackerdbs[1], 0, 1)
                 .unwrap();
-        assert_eq!(replicas.len(), 0);
+        assert!(replicas.is_empty());
 
         let mut replace_stackerdbs = vec![
             QualifiedContractIdentifier::new(
-                StandardPrincipalData(0x06, [0x07; 20]),
+                StandardPrincipalData::new(0x06, [0x07; 20]).unwrap(),
                 "db-6".into(),
             ),
             QualifiedContractIdentifier::new(
-                StandardPrincipalData(0x07, [0x08; 20]),
+                StandardPrincipalData::new(0x07, [0x08; 20]).unwrap(),
                 "db-7".into(),
             ),
         ];
@@ -2685,7 +2757,7 @@ mod test {
                 tx.commit().unwrap();
 
                 // peer already present and we were able to update
-                assert_eq!(res, true);
+                assert!(res);
             }
 
             let mut neighbor_stackerdbs = db.get_peer_stacker_dbs(&neighbor).unwrap();
@@ -2695,12 +2767,12 @@ mod test {
             let replicas =
                 PeerDB::find_stacker_db_replicas(&db.conn, 0x9abcdee0, &stackerdbs[0], 0, 1)
                     .unwrap();
-            assert_eq!(replicas.len(), 0);
+            assert!(replicas.is_empty());
 
             let replicas =
                 PeerDB::find_stacker_db_replicas(&db.conn, 0x9abcdee0, &stackerdbs[1], 0, 1)
                     .unwrap();
-            assert_eq!(replicas.len(), 0);
+            assert!(replicas.is_empty());
 
             let replicas = PeerDB::find_stacker_db_replicas(
                 &db.conn,
@@ -2710,7 +2782,7 @@ mod test {
                 1,
             )
             .unwrap();
-            assert_eq!(replicas.len(), 0);
+            assert!(replicas.is_empty());
 
             let replicas = PeerDB::find_stacker_db_replicas(
                 &db.conn,
@@ -2720,7 +2792,7 @@ mod test {
                 1,
             )
             .unwrap();
-            assert_eq!(replicas.len(), 0);
+            assert!(replicas.is_empty());
 
             let replicas = PeerDB::find_stacker_db_replicas(
                 &db.conn,
@@ -2760,31 +2832,31 @@ mod test {
 
         let replicas =
             PeerDB::find_stacker_db_replicas(&db.conn, 0x9abcdef0, &stackerdbs[0], 0, 1).unwrap();
-        assert_eq!(replicas.len(), 0);
+        assert!(replicas.is_empty());
 
         let replicas =
             PeerDB::find_stacker_db_replicas(&db.conn, 0x9abcdef0, &stackerdbs[1], 0, 1).unwrap();
-        assert_eq!(replicas.len(), 0);
+        assert!(replicas.is_empty());
 
         let replicas =
             PeerDB::find_stacker_db_replicas(&db.conn, 0x9abcdef0, &changed_stackerdbs[0], 0, 1)
                 .unwrap();
-        assert_eq!(replicas.len(), 0);
+        assert!(replicas.is_empty());
 
         let replicas =
             PeerDB::find_stacker_db_replicas(&db.conn, 0x9abcdef0, &changed_stackerdbs[1], 0, 1)
                 .unwrap();
-        assert_eq!(replicas.len(), 0);
+        assert!(replicas.is_empty());
 
         let replicas =
             PeerDB::find_stacker_db_replicas(&db.conn, 0x9abcdef0, &replace_stackerdbs[0], 0, 1)
                 .unwrap();
-        assert_eq!(replicas.len(), 0);
+        assert!(replicas.is_empty());
 
         let replicas =
             PeerDB::find_stacker_db_replicas(&db.conn, 0x9abcdef0, &replace_stackerdbs[1], 0, 1)
                 .unwrap();
-        assert_eq!(replicas.len(), 0);
+        assert!(replicas.is_empty());
     }
 
     /// Tests DB instantiation with initial neighbors. Verifies that initial neighbors are present in the
@@ -2801,7 +2873,7 @@ mod test {
                     addrbytes: PeerAddress([i as u8; 16]),
                     port: i,
                 },
-                public_key: Secp256k1PublicKey::from_private(&Secp256k1PrivateKey::new()),
+                public_key: Secp256k1PublicKey::from_private(&Secp256k1PrivateKey::random()),
                 expire_block: (i + 23456) as u64,
                 last_contact_time: (1552509642 + (i as u64)),
                 allowed: (now_secs + 600) as i64,
@@ -2821,7 +2893,7 @@ mod test {
                     addrbytes: PeerAddress([i as u8; 16]),
                     port: i,
                 },
-                public_key: Secp256k1PublicKey::from_private(&Secp256k1PrivateKey::new()),
+                public_key: Secp256k1PublicKey::from_private(&Secp256k1PrivateKey::random()),
                 expire_block: (i + 23456) as u64,
                 last_contact_time: (1552509642 + (i as u64)),
                 allowed: 0,
@@ -2859,21 +2931,22 @@ mod test {
         )
         .unwrap();
 
-        let n5 = PeerDB::get_initial_neighbors(db.conn(), 0x9abcdef0, 0x78, 5, 23455).unwrap();
+        let n5 = PeerDB::get_initial_neighbors(db.conn(), 0x9abcdef0, 0x78, 0x18000078, 5, 23455)
+            .unwrap();
         assert!(are_present(&n5, &initial_neighbors));
 
-        let n10 = PeerDB::get_initial_neighbors(db.conn(), 0x9abcdef0, 0x78, 10, 23455).unwrap();
+        let n10 = PeerDB::get_initial_neighbors(db.conn(), 0x9abcdef0, 0x78, 0x18000078, 10, 23455)
+            .unwrap();
         assert!(are_present(&n10, &initial_neighbors));
 
-        let n20 = PeerDB::get_initial_neighbors(db.conn(), 0x9abcdef0, 0x78, 20, 23455).unwrap();
+        let n20 = PeerDB::get_initial_neighbors(db.conn(), 0x9abcdef0, 0x78, 0x18000078, 20, 23455)
+            .unwrap();
         assert!(are_present(&initial_neighbors, &n20));
 
         let n15_fresh =
-            PeerDB::get_initial_neighbors(db.conn(), 0x9abcdef0, 0x78, 15, 23456 + 14).unwrap();
-        assert!(are_present(
-            &n15_fresh[10..15].to_vec(),
-            &initial_neighbors[10..20].to_vec()
-        ));
+            PeerDB::get_initial_neighbors(db.conn(), 0x9abcdef0, 0x78, 0x18000078, 15, 23456 + 14)
+                .unwrap();
+        assert!(are_present(&n15_fresh[10..15], &initial_neighbors[10..20]));
         for n in &n15_fresh[10..15] {
             assert!(n.expire_block > 23456 + 14);
             assert!(n.allowed == 0);
@@ -2905,7 +2978,7 @@ mod test {
                     addrbytes: PeerAddress([i as u8; 16]),
                     port: i,
                 },
-                public_key: Secp256k1PublicKey::from_private(&Secp256k1PrivateKey::new()),
+                public_key: Secp256k1PublicKey::from_private(&Secp256k1PrivateKey::random()),
                 expire_block: (i + 23456) as u64,
                 last_contact_time: (1552509642 + (i as u64)),
                 allowed: -1,
@@ -2926,7 +2999,7 @@ mod test {
                     addrbytes: PeerAddress([i as u8; 16]),
                     port: i,
                 },
-                public_key: Secp256k1PublicKey::from_private(&Secp256k1PrivateKey::new()),
+                public_key: Secp256k1PublicKey::from_private(&Secp256k1PrivateKey::random()),
                 expire_block: (i + 23456) as u64,
                 last_contact_time: (1552509642 + (i as u64)),
                 allowed: -1,
@@ -2967,23 +3040,27 @@ mod test {
 
         // epoch 2.0
         let n5 =
-            PeerDB::get_random_neighbors(db.conn(), 0x9abcdef0, 0x00, 5, 23455, false).unwrap();
+            PeerDB::get_random_neighbors(db.conn(), 0x9abcdef0, 0x00, 0x18000000, 5, 23455, false)
+                .unwrap();
         assert_eq!(n5.len(), 5);
         assert!(are_present(&n5, &initial_neighbors));
 
         let n10 =
-            PeerDB::get_random_neighbors(db.conn(), 0x9abcdef0, 0x00, 10, 23455, false).unwrap();
+            PeerDB::get_random_neighbors(db.conn(), 0x9abcdef0, 0x00, 0x18000000, 10, 23455, false)
+                .unwrap();
         assert_eq!(n10.len(), 10);
         assert!(are_present(&n10, &initial_neighbors));
 
         let n20 =
-            PeerDB::get_random_neighbors(db.conn(), 0x9abcdef0, 0x00, 20, 23455, false).unwrap();
+            PeerDB::get_random_neighbors(db.conn(), 0x9abcdef0, 0x00, 0x18000000, 20, 23455, false)
+                .unwrap();
         assert_eq!(n20.len(), 20);
         assert!(are_present(&initial_neighbors, &n20));
 
         // epoch 2.05
         let n5 =
-            PeerDB::get_random_neighbors(db.conn(), 0x9abcdef0, 0x05, 5, 23455, false).unwrap();
+            PeerDB::get_random_neighbors(db.conn(), 0x9abcdef0, 0x05, 0x18000005, 5, 23455, false)
+                .unwrap();
         assert_eq!(n5.len(), 5);
         assert!(are_present(&n5, &initial_neighbors));
         for n in n5 {
@@ -2991,7 +3068,8 @@ mod test {
         }
 
         let n10 =
-            PeerDB::get_random_neighbors(db.conn(), 0x9abcdef0, 0x05, 10, 23455, false).unwrap();
+            PeerDB::get_random_neighbors(db.conn(), 0x9abcdef0, 0x05, 0x18000005, 10, 23455, false)
+                .unwrap();
         assert_eq!(n10.len(), 10);
         assert!(are_present(&n10, &initial_neighbors));
         for n in n10 {
@@ -2999,16 +3077,46 @@ mod test {
         }
 
         let n20 =
-            PeerDB::get_random_neighbors(db.conn(), 0x9abcdef0, 0x05, 20, 23455, false).unwrap();
+            PeerDB::get_random_neighbors(db.conn(), 0x9abcdef0, 0x05, 0x18000005, 20, 23455, false)
+                .unwrap();
         assert_eq!(n20.len(), 10); // only 10 such neighbors are recent enough
         assert!(are_present(&n20, &initial_neighbors));
         for n in n20 {
             assert_eq!(n.addr.peer_version, 0x18000005);
         }
 
+        // peer version is past 2.05 but the current epoch is still 2.05 / always_include_allowed=false
+        let n20 =
+            PeerDB::get_random_neighbors(db.conn(), 0x9abcdef0, 0x05, 0x18000006, 20, 23455, false)
+                .unwrap();
+        assert_eq!(n20.len(), 10);
+        assert!(are_present(&n20, &initial_neighbors));
+
+        // peer version is past 2.05 but the current epoch is still 2.05 / always_include_allowed=true
+        let n20 =
+            PeerDB::get_random_neighbors(db.conn(), 0x9abcdef0, 0x05, 0x18000006, 20, 23455, true)
+                .unwrap();
+        assert_eq!(n20.len(), 10);
+        assert!(are_present(&n20, &initial_neighbors));
+
+        // current epoch is past 2.05, but peer version is 2.05 / always_include_allowed=false
+        let n20 =
+            PeerDB::get_random_neighbors(db.conn(), 0x9abcdef0, 0x06, 0x18000005, 20, 23455, false)
+                .unwrap();
+        assert_eq!(n20.len(), 10);
+        assert!(are_present(&n20, &initial_neighbors));
+
+        // current epoch is past 2.05, but peer version is 2.05 / always_include_allowed=true
+        let n20 =
+            PeerDB::get_random_neighbors(db.conn(), 0x9abcdef0, 0x06, 0x18000005, 20, 23455, true)
+                .unwrap();
+        assert_eq!(n20.len(), 10);
+        assert!(are_present(&n20, &initial_neighbors));
+
         // post epoch 2.05 -- no such neighbors
         let n20 =
-            PeerDB::get_random_neighbors(db.conn(), 0x9abcdef0, 0x06, 20, 23455, false).unwrap();
+            PeerDB::get_random_neighbors(db.conn(), 0x9abcdef0, 0x06, 0x18000006, 20, 23455, false)
+                .unwrap();
         assert_eq!(n20.len(), 0);
     }
 
@@ -3088,11 +3196,7 @@ mod test {
             0x13, 0x10,
         ]);
         let asn_invalid_opt = PeerDB::asn4_lookup(db.conn(), &asn4_invalid_addr);
-        match asn_invalid_opt {
-            Ok(_) => assert!(false),
-            Err(db_error::TypeError) => assert!(true),
-            Err(_) => assert!(false),
-        }
+        assert!(matches!(asn_invalid_opt, Err(db_error::TypeError)));
 
         // not present
         let asn4_missing_addr = PeerAddress([
@@ -3100,7 +3204,7 @@ mod test {
             0x13, 0x10,
         ]);
         let asn_missing_opt = PeerDB::asn4_lookup(db.conn(), &asn4_missing_addr).unwrap();
-        assert_eq!(asn_missing_opt, None);
+        assert!(asn_missing_opt.is_none());
     }
 
     /// Verifies that PeerDB::set_deny_peer() and PeerDB::set_allow_peer() will mark peers'
@@ -3507,8 +3611,8 @@ mod test {
     /// latest key.
     #[test]
     fn test_connect_new_key() {
-        let key1 = Secp256k1PrivateKey::new();
-        let key2 = Secp256k1PrivateKey::new();
+        let key1 = Secp256k1PrivateKey::random();
+        let key2 = Secp256k1PrivateKey::random();
 
         let path = "/tmp/test-connect-new-key.db".to_string();
         if fs::metadata(&path).is_ok() {
@@ -3575,7 +3679,7 @@ mod test {
     /// Test DB instantiation -- it must work.
     #[test]
     fn test_db_instantiation() {
-        let key1 = Secp256k1PrivateKey::new();
+        let key1 = Secp256k1PrivateKey::random();
 
         let path = "/tmp/test-peerdb-instantiation.db".to_string();
         if fs::metadata(&path).is_ok() {
@@ -3602,7 +3706,7 @@ mod test {
     /// Test `public` setting in DB migration
     #[test]
     fn test_db_schema_3_public_ip_migration() {
-        let key = Secp256k1PrivateKey::new();
+        let key = Secp256k1PrivateKey::random();
 
         let path = "/tmp/test-peerdb-schema-3-public-ip-migration.db".to_string();
         if fs::metadata(&path).is_ok() {
@@ -3673,12 +3777,12 @@ mod test {
 
         for private in private_addrbytes.iter() {
             neighbor.addr.addrbytes = private.clone();
-            neighbor.public_key = Secp256k1PublicKey::from_private(&Secp256k1PrivateKey::new());
+            neighbor.public_key = Secp256k1PublicKey::from_private(&Secp256k1PrivateKey::random());
             assert!(PeerDB::try_insert_peer(&tx, &neighbor, &[]).unwrap());
         }
         for public in public_addrbytes.iter() {
             neighbor.addr.addrbytes = public.clone();
-            neighbor.public_key = Secp256k1PublicKey::from_private(&Secp256k1PrivateKey::new());
+            neighbor.public_key = Secp256k1PublicKey::from_private(&Secp256k1PrivateKey::random());
             assert!(PeerDB::try_insert_peer(&tx, &neighbor, &[]).unwrap());
         }
         tx.execute("UPDATE frontier SET public = 1", params![])
@@ -3749,7 +3853,7 @@ mod test {
     /// Verify that multiple peers with the same public key are coalesced by last-contact-time
     #[test]
     fn test_query_peers() {
-        let key = Secp256k1PrivateKey::new();
+        let key = Secp256k1PrivateKey::random();
 
         let path = "/tmp/test-query-peers.db".to_string();
         if fs::metadata(&path).is_ok() {
@@ -3816,5 +3920,292 @@ mod test {
         let peer = peers.pop().unwrap();
         assert_eq!(peer.addr.port, 1033);
         assert_eq!(peer.last_contact_time, 1552509651);
+    }
+
+    #[test]
+    fn test_get_fresh_random_neighbors_allowed_logic() {
+        let now_secs = util::get_epoch_time_secs();
+        let current_block_height = 1000;
+
+        let network_id = NETWORK_ID_MAINNET;
+        let query_network_epoch_param = PEER_VERSION_EPOCH_3_0; // Query for peers supporting at least 3.0
+        let query_peer_version_param = PEER_VERSION_TESTNET_MAJOR | PEER_VERSION_EPOCH_3_0 as u32; // Query for peers supporting at least 3.0
+        let min_age_fresh = now_secs - 7200; // Fresh if contacted in last 2 hours
+
+        let mut db =
+            PeerDB::connect_memory(network_id, 0, 0, "http://test.com".into(), &[], &[]).unwrap();
+
+        let base_neighbor = Neighbor {
+            addr: NeighborKey {
+                peer_version: PEER_VERSION_TESTNET_MAJOR | PEER_VERSION_EPOCH_3_0 as u32, // Default to a matching epoch
+                network_id,
+                addrbytes: PeerAddress::from_ipv4(127, 0, 0, 1),
+                port: 10000, // Will change per peer
+            },
+            public_key: Secp256k1PublicKey::from_private(&Secp256k1PrivateKey::random()),
+            expire_block: current_block_height + 100,
+            last_contact_time: now_secs - 10,
+            allowed: 0,
+            denied: 0,
+            asn: 123,
+            org: 456,
+            in_degree: 1,
+            out_degree: 1,
+        };
+
+        let mut peers_to_insert = Vec::new();
+
+        // 1. Always Allowed (Fresh, Epoch 3.0)
+        let mut n_always_allowed = base_neighbor.clone();
+        n_always_allowed.addr.port = 10001;
+        n_always_allowed.addr.peer_version =
+            PEER_VERSION_TESTNET_MAJOR | PEER_VERSION_EPOCH_3_0 as u32;
+        n_always_allowed.public_key =
+            Secp256k1PublicKey::from_private(&Secp256k1PrivateKey::random());
+        n_always_allowed.allowed = -1;
+        peers_to_insert.push(n_always_allowed.clone());
+
+        // 2. Temporarily Allowed - Valid (Fresh, Epoch 3.1 - newer)
+        let mut n_temp_allowed_valid = base_neighbor.clone();
+        n_temp_allowed_valid.addr.port = 10002;
+        n_temp_allowed_valid.addr.peer_version =
+            PEER_VERSION_TESTNET_MAJOR | PEER_VERSION_EPOCH_3_1 as u32;
+        n_temp_allowed_valid.public_key =
+            Secp256k1PublicKey::from_private(&Secp256k1PrivateKey::random());
+        n_temp_allowed_valid.allowed = (now_secs + 3600) as i64;
+        peers_to_insert.push(n_temp_allowed_valid.clone());
+
+        // 3. Temporarily Allowed - Expired (Fresh, Epoch 3.0)
+        let mut n_temp_allowed_expired = base_neighbor.clone();
+        n_temp_allowed_expired.addr.port = 10003;
+        n_temp_allowed_expired.addr.peer_version =
+            PEER_VERSION_TESTNET_MAJOR | PEER_VERSION_EPOCH_3_0 as u32;
+        n_temp_allowed_expired.public_key =
+            Secp256k1PublicKey::from_private(&Secp256k1PrivateKey::random());
+        n_temp_allowed_expired.allowed = (now_secs - 3600) as i64;
+        peers_to_insert.push(n_temp_allowed_expired.clone());
+
+        // 4. Neutral (allowed = 0) (Fresh, Epoch 3.0)
+        let mut n_neutral = base_neighbor.clone();
+        n_neutral.addr.port = 10004;
+        n_neutral.addr.peer_version = PEER_VERSION_TESTNET_MAJOR | PEER_VERSION_EPOCH_3_0 as u32;
+        n_neutral.public_key = Secp256k1PublicKey::from_private(&Secp256k1PrivateKey::random());
+        n_neutral.allowed = 0;
+        peers_to_insert.push(n_neutral.clone());
+
+        // 5. Denied (Fresh, Epoch 3.0) - Should not be picked
+        let mut n_denied = base_neighbor.clone();
+        n_denied.addr.port = 10005;
+        n_denied.addr.peer_version = PEER_VERSION_TESTNET_MAJOR | PEER_VERSION_EPOCH_3_0 as u32;
+        n_denied.public_key = Secp256k1PublicKey::from_private(&Secp256k1PrivateKey::random());
+        n_denied.denied = (now_secs + 3600) as i64;
+        peers_to_insert.push(n_denied.clone());
+
+        // 6. Denied - Expired (Effectively NOT Denied) (Fresh, Epoch 3.0)
+        let mut n_denied_expired = base_neighbor.clone();
+        n_denied_expired.addr.port = 10006;
+        n_denied_expired.addr.peer_version =
+            PEER_VERSION_TESTNET_MAJOR | PEER_VERSION_EPOCH_3_0 as u32;
+        n_denied_expired.public_key =
+            Secp256k1PublicKey::from_private(&Secp256k1PrivateKey::random());
+        n_denied_expired.denied = (now_secs - 3600) as i64;
+        peers_to_insert.push(n_denied_expired.clone());
+
+        // 7. Always Allowed - But actually Denied (Fresh, Epoch 3.0) - Should not be picked
+        let mut n_always_allowed_denied = base_neighbor.clone();
+        n_always_allowed_denied.addr.port = 10007;
+        n_always_allowed_denied.addr.peer_version =
+            PEER_VERSION_TESTNET_MAJOR | PEER_VERSION_EPOCH_3_0 as u32;
+        n_always_allowed_denied.public_key =
+            Secp256k1PublicKey::from_private(&Secp256k1PrivateKey::random());
+        n_always_allowed_denied.allowed = -1;
+        n_always_allowed_denied.denied = (now_secs + 3600) as i64;
+        peers_to_insert.push(n_always_allowed_denied.clone());
+
+        // 8. Temp Allowed Valid - But actually Denied (Fresh, Epoch 3.0) - Should not be picked
+        let mut n_temp_allowed_valid_denied = base_neighbor.clone();
+        n_temp_allowed_valid_denied.addr.port = 10008;
+        n_temp_allowed_valid_denied.addr.peer_version =
+            PEER_VERSION_TESTNET_MAJOR | PEER_VERSION_EPOCH_3_0 as u32;
+        n_temp_allowed_valid_denied.public_key =
+            Secp256k1PublicKey::from_private(&Secp256k1PrivateKey::random());
+        n_temp_allowed_valid_denied.allowed = (now_secs + 3600) as i64;
+        n_temp_allowed_valid_denied.denied = (now_secs + 3600) as i64;
+        peers_to_insert.push(n_temp_allowed_valid_denied.clone());
+
+        // 9. Not Fresh LCT - But Always Allowed (Epoch 3.0) (For always_include_allowed=true test)
+        let mut n_not_fresh_lct_always_allowed = base_neighbor.clone();
+        n_not_fresh_lct_always_allowed.addr.port = 10009;
+        n_not_fresh_lct_always_allowed.addr.peer_version =
+            PEER_VERSION_TESTNET_MAJOR | PEER_VERSION_EPOCH_3_0 as u32;
+        n_not_fresh_lct_always_allowed.public_key =
+            Secp256k1PublicKey::from_private(&Secp256k1PrivateKey::random());
+        n_not_fresh_lct_always_allowed.allowed = -1;
+        n_not_fresh_lct_always_allowed.last_contact_time = min_age_fresh - 10;
+        peers_to_insert.push(n_not_fresh_lct_always_allowed.clone());
+
+        // 10. Not Fresh Expire - But Temp Allowed Valid (Epoch 3.0) (For always_include_allowed=true test)
+        let mut n_not_fresh_expire_temp_allowed = base_neighbor.clone();
+        n_not_fresh_expire_temp_allowed.addr.port = 10010;
+        n_not_fresh_expire_temp_allowed.addr.peer_version =
+            PEER_VERSION_TESTNET_MAJOR | PEER_VERSION_EPOCH_3_0 as u32;
+        n_not_fresh_expire_temp_allowed.public_key =
+            Secp256k1PublicKey::from_private(&Secp256k1PrivateKey::random());
+        n_not_fresh_expire_temp_allowed.allowed = (now_secs + 3600) as i64;
+        n_not_fresh_expire_temp_allowed.expire_block = current_block_height - 10;
+        peers_to_insert.push(n_not_fresh_expire_temp_allowed.clone());
+
+        // 11. Old Epoch Peer (Fresh, Neutral) - Should be filtered by query_network_epoch_param
+        let mut n_old_epoch_peer = base_neighbor.clone();
+        n_old_epoch_peer.addr.port = 10012; // New port for this peer
+        n_old_epoch_peer.addr.peer_version =
+            PEER_VERSION_TESTNET_MAJOR | PEER_VERSION_EPOCH_2_0 as u32; // Older epoch
+        n_old_epoch_peer.public_key =
+            Secp256k1PublicKey::from_private(&Secp256k1PrivateKey::random());
+        n_old_epoch_peer.allowed = 0; // Neutral
+        n_old_epoch_peer.denied = 0; // Not denied
+        n_old_epoch_peer.last_contact_time = now_secs - 10; // Fresh LCT
+        n_old_epoch_peer.expire_block = current_block_height + 100; // Fresh expire
+        peers_to_insert.push(n_old_epoch_peer.clone());
+
+        {
+            let tx = db.tx_begin().unwrap();
+            for peer in &peers_to_insert {
+                assert!(PeerDB::try_insert_peer(&tx, peer, &[]).unwrap());
+            }
+            tx.commit().unwrap();
+        }
+
+        // --- Test Case 1: always_include_allowed = false ---
+        // Expected to pick from fresh, non-denied peers matching query_network_epoch_param.
+        // Candidates: n_always_allowed, n_temp_allowed_valid, n_temp_allowed_expired, n_neutral, n_denied_expired (5 total)
+        // n_old_epoch_peer is filtered out due to its older epoch.
+        let count_false = 5;
+        let results_false = PeerDB::get_fresh_random_neighbors(
+            db.conn(),
+            network_id,
+            query_network_epoch_param,
+            query_peer_version_param,
+            min_age_fresh,
+            count_false,
+            current_block_height,
+            false,
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(results_false.len() as u32, count_false, "Should get all fresh, non-denied peers matching epoch for always_include_allowed=false");
+
+        let result_ports_false: HashSet<u16> = results_false.iter().map(|p| p.addr.port).collect();
+        let expected_candidate_ports_false: HashSet<u16> = [
+            n_always_allowed.addr.port,
+            n_temp_allowed_valid.addr.port,
+            n_temp_allowed_expired.addr.port,
+            n_neutral.addr.port,
+            n_denied_expired.addr.port,
+        ]
+        .iter()
+        .cloned()
+        .collect();
+
+        assert_eq!(
+            result_ports_false, expected_candidate_ports_false,
+            "Mismatch in candidates for always_include_allowed=false with epoch filtering"
+        );
+        assert!(
+            !result_ports_false.contains(&n_old_epoch_peer.addr.port),
+            "Old epoch peer should be filtered out"
+        );
+
+        // --- Test Case 2: always_include_allowed = true ---
+        // Phase 1 (allow_qry picks, matching query_network_epoch_param):
+        //   - n_always_allowed (Fresh, Allowed<0, Epoch 3.0) -> YES
+        //   - n_temp_allowed_valid (Fresh, TempAllowedValid, Epoch 3.1) -> YES
+        //   - n_not_fresh_lct_always_allowed (NotFreshLCT, Allowed<0, Epoch 3.0) -> YES
+        //   - n_not_fresh_expire_temp_allowed (NotFreshExpire, TempAllowedValid, Epoch 3.0) -> YES
+        // Phase 1 count = 4.
+        // Phase 2 (random_peers_qry with include_allowed_condition, freshness from params, and matching query_network_epoch_param):
+        //   - n_temp_allowed_expired (Fresh, TempAllowedExpired, Epoch 3.0) -> YES
+        //   - n_neutral (Fresh, Neutral, Epoch 3.0) -> YES
+        //   - n_denied_expired (Fresh, DeniedExpired, NeutralAllowed, Epoch 3.0) -> YES
+        // Phase 2 count = 3.
+        // Total possible unique peers = 7 (n_old_epoch_peer still filtered out)
+
+        let count_true = 7;
+        let results_true = PeerDB::get_fresh_random_neighbors(
+            db.conn(),
+            network_id,
+            query_network_epoch_param,
+            query_peer_version_param,
+            min_age_fresh,
+            count_true,
+            current_block_height,
+            true,
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(
+            results_true.len() as u32,
+            count_true,
+            "Should get all 7 expected peers for always_include_allowed=true with epoch filtering"
+        );
+
+        let result_ports_true: HashSet<u16> = results_true.iter().map(|p| p.addr.port).collect();
+        let expected_candidate_ports_true: HashSet<u16> = [
+            n_always_allowed.addr.port,
+            n_temp_allowed_valid.addr.port,
+            n_temp_allowed_expired.addr.port,
+            n_neutral.addr.port,
+            n_denied_expired.addr.port,
+            n_not_fresh_lct_always_allowed.addr.port,
+            n_not_fresh_expire_temp_allowed.addr.port,
+        ]
+        .iter()
+        .cloned()
+        .collect();
+
+        assert_eq!(
+            result_ports_true, expected_candidate_ports_true,
+            "Mismatch in candidates for always_include_allowed=true with epoch filtering"
+        );
+        assert!(
+            !result_ports_true.contains(&n_old_epoch_peer.addr.port),
+            "Old epoch peer should be filtered out for always_include_allowed=true as well"
+        );
+
+        // Test Case 2 Small: Verify that when count is less than or equal to the number of Phase 1 candidates,
+        // the result should only contain Phase 1 candidates (only allowed peers), when always_include_allowed=true.
+        // This ensures we prioritize Phase 1 candidates over Phase 2 candidates when we have a limited count.
+        let count_true_small = 4;
+        let results_true_small = PeerDB::get_fresh_random_neighbors(
+            db.conn(),
+            network_id,
+            query_network_epoch_param,
+            query_peer_version_param,
+            min_age_fresh,
+            count_true_small,
+            current_block_height,
+            true,
+            false,
+        )
+        .unwrap();
+        assert_eq!(results_true_small.len() as u32, count_true_small);
+        let result_ports_true_small: HashSet<u16> =
+            results_true_small.iter().map(|p| p.addr.port).collect();
+
+        let phase1_candidate_ports: HashSet<u16> = [
+            n_always_allowed.addr.port,                // Epoch 3.0
+            n_temp_allowed_valid.addr.port,            // Epoch 3.1
+            n_not_fresh_lct_always_allowed.addr.port,  // Epoch 3.0
+            n_not_fresh_expire_temp_allowed.addr.port, // Epoch 3.0
+        ]
+        .iter()
+        .cloned()
+        .collect();
+
+        for port in result_ports_true_small {
+            assert!(phase1_candidate_ports.contains(&port), "Peers for always_include_allowed=true with small count should come from Phase 1 candidates (epoch filtered)");
+        }
     }
 }

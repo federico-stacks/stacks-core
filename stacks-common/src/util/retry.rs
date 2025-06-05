@@ -18,11 +18,7 @@
 */
 
 use std::io;
-use std::io::prelude::*;
-use std::io::{Read, Write};
-
-use crate::util::hash::to_hex;
-use crate::util::log;
+use std::io::Read;
 
 /// Wrap a Read so that we store a copy of what was read.
 /// Used for re-trying reads when we don't know what to expect from the stream.
@@ -103,9 +99,7 @@ impl<R: Read> Read for BoundReader<'_, R> {
         let intended_read = self
             .read_so_far
             .checked_add(buf.len() as u64)
-            .ok_or_else(|| {
-                io::Error::new(io::ErrorKind::Other, "Read would overflow u64".to_string())
-            })?;
+            .ok_or_else(|| io::Error::other("Read would overflow u64".to_string()))?;
         let max_read = if intended_read > self.max_len {
             self.max_len - self.read_so_far
         } else {

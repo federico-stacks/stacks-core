@@ -25,8 +25,8 @@ pub use clarity::vm::clarity::{ClarityConnection, Error};
 use clarity::vm::contexts::{AssetMap, Environment, OwnedEnvironment};
 use clarity::vm::costs::{CostTracker, ExecutionCost, LimitedCostTracker};
 use clarity::vm::database::{
-    BurnStateDB, ClarityDatabase, HeadersDB, RollbackWrapper, RollbackWrapperPersistedLog,
-    STXBalance, SqliteConnection, NULL_BURN_STATE_DB, NULL_HEADER_DB,
+    BurnStateDB, ClarityBackingStore, ClarityDatabase, HeadersDB, RollbackWrapper,
+    RollbackWrapperPersistedLog, STXBalance, SqliteConnection, NULL_BURN_STATE_DB, NULL_HEADER_DB,
 };
 use clarity::vm::errors::Error as InterpreterError;
 use clarity::vm::representations::SymbolicExpression;
@@ -132,13 +132,38 @@ pub struct ClarityBlockConnection<'a, 'b> {
 ///   rollback the transaction by dropping this struct.
 pub struct ClarityTransactionConnection<'a, 'b> {
     log: Option<RollbackWrapperPersistedLog>,
-    store: &'a mut WritableMarfStore<'b>,
+    store: &'b mut dyn ClarityBackingStore,
     header_db: &'a dyn HeadersDB,
     burn_state_db: &'a dyn BurnStateDB,
     cost_track: &'a mut Option<LimitedCostTracker>,
     mainnet: bool,
     chain_id: u32,
     epoch: StacksEpochId,
+}
+
+impl<'a, 'b> ClarityTransactionConnection<'a, 'b> {
+    pub fn new(
+        store: &'b mut dyn ClarityBackingStore,
+        header_db: &'a dyn HeadersDB,
+        burn_state_db: &'a dyn BurnStateDB,
+        cost_track: &'a mut Option<LimitedCostTracker>,
+        mainnet: bool,
+        chain_id: u32,
+        epoch: StacksEpochId,
+    ) -> ClarityTransactionConnection<'a, 'b> {
+        let mut log = RollbackWrapperPersistedLog::new();
+        log.nest();
+        ClarityTransactionConnection {
+            log: Some(log),
+            store,
+            header_db,
+            burn_state_db,
+            cost_track,
+            mainnet,
+            chain_id,
+            epoch,
+        }
+    }
 }
 
 pub struct ClarityReadOnlyConnection<'a> {
@@ -386,7 +411,8 @@ impl ClarityInstance {
                     &ast,
                     BOOT_CODE_COSTS,
                     None,
-                    |_, _| false,
+                    |_, _| None,
+                    None,
                 )
                 .unwrap();
         });
@@ -407,7 +433,8 @@ impl ClarityInstance {
                     &ast,
                     &*BOOT_CODE_COST_VOTING,
                     None,
-                    |_, _| false,
+                    |_, _| None,
+                    None,
                 )
                 .unwrap();
 
@@ -432,7 +459,8 @@ impl ClarityInstance {
                     &ast,
                     &*BOOT_CODE_POX_TESTNET,
                     None,
-                    |_, _| false,
+                    |_, _| None,
+                    None,
                 )
                 .unwrap();
         });
@@ -483,7 +511,8 @@ impl ClarityInstance {
                     &ast,
                     BOOT_CODE_COSTS_2,
                     None,
-                    |_, _| false,
+                    |_, _| None,
+                    None,
                 )
                 .unwrap();
         });
@@ -504,7 +533,8 @@ impl ClarityInstance {
                     &ast,
                     BOOT_CODE_COSTS_3,
                     None,
-                    |_, _| false,
+                    |_, _| None,
+                    None,
                 )
                 .unwrap();
         });
@@ -525,7 +555,8 @@ impl ClarityInstance {
                     &ast,
                     &*POX_2_TESTNET_CODE,
                     None,
-                    |_, _| false,
+                    |_, _| None,
+                    None,
                 )
                 .unwrap();
         });
@@ -856,7 +887,7 @@ impl<'a> ClarityBlockConnection<'a, '_> {
             let boot_code_auth = boot_code_tx_auth(boot_code_address.clone());
 
             let costs_2_contract_tx =
-                StacksTransaction::new(tx_version.clone(), boot_code_auth.clone(), payload);
+                StacksTransaction::new(tx_version.clone(), boot_code_auth, payload);
 
             let initialization_receipt = self.as_transaction(|tx_conn| {
                 // bump the epoch in the Clarity DB
@@ -878,6 +909,7 @@ impl<'a> ClarityBlockConnection<'a, '_> {
                     &costs_2_contract_tx,
                     &boot_code_account,
                     ASTRules::PrecheckSize,
+                    None,
                 )
                 .expect("FATAL: Failed to process PoX 2 contract initialization");
 
@@ -991,6 +1023,7 @@ impl<'a> ClarityBlockConnection<'a, '_> {
                     &pox_2_contract_tx,
                     &boot_code_account,
                     ASTRules::PrecheckSize,
+                    None,
                 )
                 .expect("FATAL: Failed to process PoX 2 contract initialization");
 
@@ -1011,7 +1044,8 @@ impl<'a> ClarityBlockConnection<'a, '_> {
                         &pox_2_contract_id,
                         "set-burnchain-parameters",
                         &params,
-                        |_, _| false,
+                        |_, _| None,
+                        None,
                     )
                     .expect("Failed to set burnchain parameters in PoX-2 contract");
 
@@ -1041,7 +1075,7 @@ impl<'a> ClarityBlockConnection<'a, '_> {
             );
 
             let costs_3_contract_tx =
-                StacksTransaction::new(tx_version.clone(), boot_code_auth.clone(), payload);
+                StacksTransaction::new(tx_version.clone(), boot_code_auth, payload);
 
             let costs_3_initialization_receipt = self.as_transaction(|tx_conn| {
                 // bump the epoch in the Clarity DB
@@ -1062,6 +1096,7 @@ impl<'a> ClarityBlockConnection<'a, '_> {
                     &costs_3_contract_tx,
                     &boot_code_account,
                     ASTRules::PrecheckSize,
+                    None,
                 )
                 .expect("FATAL: Failed to process costs-3 contract initialization");
 
@@ -1222,7 +1257,7 @@ impl<'a> ClarityBlockConnection<'a, '_> {
             );
 
             let pox_3_contract_tx =
-                StacksTransaction::new(tx_version.clone(), boot_code_auth.clone(), payload);
+                StacksTransaction::new(tx_version.clone(), boot_code_auth, payload);
 
             let pox_3_initialization_receipt = self.as_transaction(|tx_conn| {
                 // initialize with a synthetic transaction
@@ -1232,6 +1267,7 @@ impl<'a> ClarityBlockConnection<'a, '_> {
                     &pox_3_contract_tx,
                     &boot_code_account,
                     ASTRules::PrecheckSize,
+                    None,
                 )
                 .expect("FATAL: Failed to process PoX 3 contract initialization");
 
@@ -1252,7 +1288,8 @@ impl<'a> ClarityBlockConnection<'a, '_> {
                         &pox_3_contract_id,
                         "set-burnchain-parameters",
                         &params,
-                        |_, _| false,
+                        |_, _| None,
+                        None,
                     )
                     .expect("Failed to set burnchain parameters in PoX-3 contract");
 
@@ -1349,6 +1386,7 @@ impl<'a> ClarityBlockConnection<'a, '_> {
                     &pox_4_contract_tx,
                     &boot_code_account,
                     ASTRules::PrecheckSize,
+                    None,
                 )
                 .expect("FATAL: Failed to process PoX 4 contract initialization");
 
@@ -1368,7 +1406,8 @@ impl<'a> ClarityBlockConnection<'a, '_> {
                         &pox_4_contract_id,
                         "set-burnchain-parameters",
                         &params,
-                        |_, _| false,
+                        |_, _| None,
+                        None,
                     )
                     .expect("Failed to set burnchain parameters in PoX-3 contract");
 
@@ -1407,6 +1446,7 @@ impl<'a> ClarityBlockConnection<'a, '_> {
                     &signers_contract_tx,
                     &boot_code_account,
                     ASTRules::PrecheckSize,
+                    None,
                 )
                 .expect("FATAL: Failed to process .signers contract initialization");
                 receipt
@@ -1453,6 +1493,7 @@ impl<'a> ClarityBlockConnection<'a, '_> {
                             &signers_contract_tx,
                             &boot_code_account,
                             ASTRules::PrecheckSize,
+                            None,
                         )
                         .expect("FATAL: Failed to process .signers DB contract initialization");
                         receipt
@@ -1483,7 +1524,7 @@ impl<'a> ClarityBlockConnection<'a, '_> {
             );
 
             let signers_contract_tx =
-                StacksTransaction::new(tx_version.clone(), boot_code_auth.clone(), payload);
+                StacksTransaction::new(tx_version.clone(), boot_code_auth, payload);
 
             let signers_voting_initialization_receipt = self.as_transaction(|tx_conn| {
                 // initialize with a synthetic transaction
@@ -1493,6 +1534,7 @@ impl<'a> ClarityBlockConnection<'a, '_> {
                     &signers_contract_tx,
                     &boot_code_account,
                     ASTRules::PrecheckSize,
+                    None,
                 )
                 .expect("FATAL: Failed to process .signers-voting contract initialization");
                 receipt
@@ -1565,25 +1607,16 @@ impl<'a> ClarityBlockConnection<'a, '_> {
         })
     }
 
-    pub fn start_transaction_processing<'c>(&'c mut self) -> ClarityTransactionConnection<'c, 'a> {
-        let store = &mut self.datastore;
-        let cost_track = &mut self.cost_track;
-        let header_db = self.header_db;
-        let burn_state_db = self.burn_state_db;
-        let mainnet = self.mainnet;
-        let chain_id = self.chain_id;
-        let mut log = RollbackWrapperPersistedLog::new();
-        log.nest();
-        ClarityTransactionConnection {
-            store,
-            cost_track,
-            header_db,
-            burn_state_db,
-            log: Some(log),
-            mainnet,
-            chain_id,
-            epoch: self.epoch,
-        }
+    pub fn start_transaction_processing(&mut self) -> ClarityTransactionConnection {
+        ClarityTransactionConnection::new(
+            &mut self.datastore,
+            self.header_db,
+            self.burn_state_db,
+            &mut self.cost_track,
+            self.mainnet,
+            self.chain_id,
+            self.epoch,
+        )
     }
 
     /// Execute `todo` as a transaction in this block. The execution
@@ -1663,9 +1696,9 @@ impl ClarityConnection for ClarityTransactionConnection<'_, '_> {
     where
         F: FnOnce(&mut AnalysisDatabase) -> R,
     {
-        self.with_analysis_db(|mut db, cost_tracker| {
+        self.with_analysis_db(|db, cost_tracker| {
             db.begin();
-            let result = to_do(&mut db);
+            let result = to_do(db);
             db.roll_back()
                 .expect("FATAL: failed to rollback changes during read-only connection");
             (cost_tracker, result)
@@ -1702,9 +1735,9 @@ impl TransactionConnection for ClarityTransactionConnection<'_, '_> {
         &mut self,
         to_do: F,
         abort_call_back: A,
-    ) -> Result<(R, AssetMap, Vec<StacksTransactionEvent>, bool), E>
+    ) -> Result<(R, AssetMap, Vec<StacksTransactionEvent>, Option<String>), E>
     where
-        A: FnOnce(&AssetMap, &mut ClarityDatabase) -> bool,
+        A: FnOnce(&AssetMap, &mut ClarityDatabase) -> Option<String>,
         F: FnOnce(&mut OwnedEnvironment) -> Result<(R, AssetMap, Vec<StacksTransactionEvent>), E>,
         E: From<InterpreterError>,
     {
@@ -1736,7 +1769,11 @@ impl TransactionConnection for ClarityTransactionConnection<'_, '_> {
                 let result = match result {
                     Ok((value, asset_map, events)) => {
                         let aborted = abort_call_back(&asset_map, &mut db);
-                        let db_result = if aborted { db.roll_back() } else { db.commit() };
+                        let db_result = if aborted.is_some() {
+                            db.roll_back()
+                        } else {
+                            db.commit()
+                        };
                         match db_result {
                             Ok(_) => Ok((value, asset_map, events, aborted)),
                             Err(e) => Err(e.into()),
@@ -1831,7 +1868,7 @@ impl ClarityTransactionConnection<'_, '_> {
                     })
                     .map_err(Error::from)
             },
-            |_, _| false,
+            |_, _| None,
         )
         .map(|(value, ..)| value)
     }
@@ -1891,7 +1928,7 @@ impl ClarityTransactionConnection<'_, '_> {
                     )
                     .map_err(Error::from)
             },
-            |_, _| true,
+            |_, _| Some("read-only".to_string()),
         )?;
         Ok(result)
     }
@@ -1901,7 +1938,7 @@ impl ClarityTransactionConnection<'_, '_> {
     pub fn clarity_eval_raw(&mut self, code: &str) -> Result<Value, Error> {
         let (result, _, _, _) = self.with_abort_callback(
             |vm_env| vm_env.eval_raw(code).map_err(Error::from),
-            |_, _| false,
+            |_, _| None,
         )?;
         Ok(result)
     }
@@ -1914,7 +1951,7 @@ impl ClarityTransactionConnection<'_, '_> {
     ) -> Result<Value, Error> {
         let (result, _, _, _) = self.with_abort_callback(
             |vm_env| vm_env.eval_read_only(contract, code).map_err(Error::from),
-            |_, _| false,
+            |_, _| None,
         )?;
         Ok(result)
     }
@@ -1923,6 +1960,7 @@ impl ClarityTransactionConnection<'_, '_> {
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::path::PathBuf;
 
     use clarity::vm::analysis::errors::CheckErrors;
     use clarity::vm::database::{ClarityBackingStore, STXBalance};
@@ -1933,9 +1971,56 @@ mod tests {
     use stacks_common::types::sqlite::NO_PARAMS;
 
     use super::*;
+    use crate::chainstate::stacks::index::marf::{MARFOpenOpts, MarfConnection as _};
     use crate::chainstate::stacks::index::ClarityMarfTrieId;
     use crate::clarity_vm::database::marf::MarfedKV;
     use crate::core::{PEER_VERSION_EPOCH_1_0, PEER_VERSION_EPOCH_2_0, PEER_VERSION_EPOCH_2_05};
+
+    #[test]
+    pub fn create_md_index() {
+        let path_db = "/tmp/stacks-node-tests/creat_md_index";
+        let _ = std::fs::remove_dir_all(path_db);
+        let mut path = PathBuf::from(path_db);
+
+        std::fs::create_dir_all(&path).unwrap();
+
+        path.push("marf.sqlite");
+        let marf_path = path.to_str().unwrap().to_string();
+
+        let mut marf_opts = MARFOpenOpts::default();
+        marf_opts.external_blobs = true;
+
+        let mut marf: MARF<StacksBlockId> = MARF::from_path(&marf_path, marf_opts).unwrap();
+
+        let tx = marf.storage_tx().unwrap();
+
+        tx.query_row("PRAGMA journal_mode = WAL;", NO_PARAMS, |_row| Ok(()))
+            .unwrap();
+
+        tx.execute(
+            "CREATE TABLE IF NOT EXISTS data_table
+                      (key TEXT PRIMARY KEY, value TEXT)",
+            NO_PARAMS,
+        )
+        .unwrap();
+
+        tx.execute(
+            "CREATE TABLE IF NOT EXISTS metadata_table
+                      (key TEXT NOT NULL, blockhash TEXT, value TEXT,
+                       UNIQUE (key, blockhash))",
+            NO_PARAMS,
+        )
+        .unwrap();
+
+        tx.commit().unwrap();
+
+        assert!(SqliteConnection::check_schema(marf.sqlite_conn()).is_err());
+
+        MarfedKV::open(path_db, None, None).unwrap();
+
+        // schema should be good now
+        assert!(SqliteConnection::check_schema(marf.sqlite_conn()).is_ok());
+    }
 
     #[test]
     pub fn bad_syntax_test() {
@@ -1968,7 +2053,7 @@ mod tests {
                     tx.analyze_smart_contract(
                         &contract_identifier,
                         ClarityVersion::Clarity1,
-                        &contract,
+                        contract,
                         ASTRules::PrecheckSize,
                     )
                 })
@@ -1981,7 +2066,7 @@ mod tests {
                     tx.analyze_smart_contract(
                         &contract_identifier,
                         ClarityVersion::Clarity1,
-                        &contract,
+                        contract,
                         ASTRules::PrecheckSize,
                     )
                 })
@@ -2016,7 +2101,7 @@ mod tests {
 
             // S1G2081040G2081040G2081040G208105NK8PE5 is the transient address
             let contract = "
-                (begin 
+                (begin
                     (asserts! (is-eq tx-sender 'S1G2081040G2081040G2081040G208105NK8PE5)
                         (err tx-sender))
 
@@ -2029,7 +2114,7 @@ mod tests {
                     .analyze_smart_contract(
                         &contract_identifier,
                         ClarityVersion::Clarity1,
-                        &contract,
+                        contract,
                         ASTRules::PrecheckSize,
                     )
                     .unwrap();
@@ -2037,9 +2122,10 @@ mod tests {
                     &contract_identifier,
                     ClarityVersion::Clarity1,
                     &ct_ast,
-                    &contract,
+                    contract,
                     None,
-                    |_, _| false,
+                    |_, _| None,
+                    None,
                 )
                 .unwrap();
                 conn.save_analysis(&contract_identifier, &ct_analysis)
@@ -2082,7 +2168,7 @@ mod tests {
                     .analyze_smart_contract(
                         &contract_identifier,
                         ClarityVersion::Clarity1,
-                        &contract,
+                        contract,
                         ASTRules::PrecheckSize,
                     )
                     .unwrap();
@@ -2090,9 +2176,10 @@ mod tests {
                     &contract_identifier,
                     ClarityVersion::Clarity1,
                     &ct_ast,
-                    &contract,
+                    contract,
                     None,
-                    |_, _| false,
+                    |_, _| None,
+                    None,
                 )
                 .unwrap();
                 tx.save_analysis(&contract_identifier, &ct_analysis)
@@ -2110,7 +2197,7 @@ mod tests {
                     .analyze_smart_contract(
                         &contract_identifier,
                         ClarityVersion::Clarity1,
-                        &contract,
+                        contract,
                         ASTRules::PrecheckSize,
                     )
                     .unwrap();
@@ -2118,9 +2205,10 @@ mod tests {
                     &contract_identifier,
                     ClarityVersion::Clarity1,
                     &ct_ast,
-                    &contract,
+                    contract,
                     None,
-                    |_, _| false,
+                    |_, _| None,
+                    None,
                 )
                 .unwrap();
                 tx.save_analysis(&contract_identifier, &ct_analysis)
@@ -2140,7 +2228,7 @@ mod tests {
                     .analyze_smart_contract(
                         &contract_identifier,
                         ClarityVersion::Clarity1,
-                        &contract,
+                        contract,
                         ASTRules::PrecheckSize,
                     )
                     .unwrap();
@@ -2150,9 +2238,10 @@ mod tests {
                         &contract_identifier,
                         ClarityVersion::Clarity1,
                         &ct_ast,
-                        &contract,
+                        contract,
                         None,
-                        |_, _| false
+                        |_, _| None,
+                        None
                     )
                     .unwrap_err()
                 )
@@ -2194,7 +2283,7 @@ mod tests {
                     .analyze_smart_contract(
                         &contract_identifier,
                         ClarityVersion::Clarity1,
-                        &contract,
+                        contract,
                         ASTRules::PrecheckSize,
                     )
                     .unwrap();
@@ -2202,9 +2291,10 @@ mod tests {
                     &contract_identifier,
                     ClarityVersion::Clarity1,
                     &ct_ast,
-                    &contract,
+                    contract,
                     None,
-                    |_, _| false,
+                    |_, _| None,
+                    None,
                 )
                 .unwrap();
                 conn.save_analysis(&contract_identifier, &ct_analysis)
@@ -2218,7 +2308,8 @@ mod tests {
                     &contract_identifier,
                     "foo",
                     &[Value::Int(1)],
-                    |_, _| false
+                    |_, _| None,
+                    None
                 ))
                 .unwrap()
                 .0,
@@ -2254,7 +2345,7 @@ mod tests {
                     .analyze_smart_contract(
                         &contract_identifier,
                         ClarityVersion::Clarity1,
-                        &contract,
+                        contract,
                         ASTRules::PrecheckSize,
                     )
                     .unwrap();
@@ -2262,9 +2353,10 @@ mod tests {
                     &contract_identifier,
                     ClarityVersion::Clarity1,
                     &ct_ast,
-                    &contract,
+                    contract,
                     None,
-                    |_, _| false,
+                    |_, _| None,
+                    None,
                 )
                 .unwrap();
                 conn.save_analysis(&contract_identifier, &ct_analysis)
@@ -2346,7 +2438,7 @@ mod tests {
                     .analyze_smart_contract(
                         &contract_identifier,
                         ClarityVersion::Clarity1,
-                        &contract,
+                        contract,
                         ASTRules::PrecheckSize,
                     )
                     .unwrap();
@@ -2354,9 +2446,10 @@ mod tests {
                     &contract_identifier,
                     ClarityVersion::Clarity1,
                     &ct_ast,
-                    &contract,
+                    contract,
                     None,
-                    |_, _| false,
+                    |_, _| None,
+                    None,
                 )
                 .unwrap();
                 conn.save_analysis(&contract_identifier, &ct_analysis)
@@ -2477,7 +2570,7 @@ mod tests {
                     .analyze_smart_contract(
                         &contract_identifier,
                         ClarityVersion::Clarity1,
-                        &contract,
+                        contract,
                         ASTRules::PrecheckSize,
                     )
                     .unwrap();
@@ -2485,9 +2578,10 @@ mod tests {
                     &contract_identifier,
                     ClarityVersion::Clarity1,
                     &ct_ast,
-                    &contract,
+                    contract,
                     None,
-                    |_, _| false,
+                    |_, _| None,
+                    None,
                 )
                 .unwrap();
                 conn.save_analysis(&contract_identifier, &ct_analysis)
@@ -2501,7 +2595,8 @@ mod tests {
                     &contract_identifier,
                     "get-bar",
                     &[],
-                    |_, _| false
+                    |_, _| None,
+                    None
                 ))
                 .unwrap()
                 .0,
@@ -2515,7 +2610,8 @@ mod tests {
                     &contract_identifier,
                     "set-bar",
                     &[Value::Int(1), Value::Int(1)],
-                    |_, _| false
+                    |_, _| None,
+                    None
                 ))
                 .unwrap()
                 .0,
@@ -2530,12 +2626,13 @@ mod tests {
                         &contract_identifier,
                         "set-bar",
                         &[Value::Int(10), Value::Int(1)],
-                        |_, _| true,
+                        |_, _| Some("testing rollback".to_string()),
+                        None,
                     )
                 })
                 .unwrap_err();
-            let result_value = if let Error::AbortedByCallback(v, ..) = e {
-                v.unwrap()
+            let result_value = if let Error::AbortedByCallback { output, .. } = e {
+                output.unwrap()
             } else {
                 panic!("Expects a AbortedByCallback error")
             };
@@ -2550,7 +2647,8 @@ mod tests {
                     &contract_identifier,
                     "get-bar",
                     &[],
-                    |_, _| false
+                    |_, _| None,
+                    None
                 ))
                 .unwrap()
                 .0,
@@ -2565,7 +2663,8 @@ mod tests {
                     &contract_identifier,
                     "set-bar",
                     &[Value::Int(10), Value::Int(0)],
-                    |_, _| true
+                    |_, _| Some("testing rollback".to_string()),
+                    None
                 ))
                 .unwrap_err()
             )
@@ -2579,7 +2678,8 @@ mod tests {
                     &contract_identifier,
                     "get-bar",
                     &[],
-                    |_, _| false
+                    |_, _| None,
+                    None
                 ))
                 .unwrap()
                 .0,
@@ -2646,7 +2746,7 @@ mod tests {
 
         let mut tx3 = StacksTransaction::new(
             TransactionVersion::Mainnet,
-            TransactionAuth::Standard(spending_cond.clone()),
+            TransactionAuth::Standard(spending_cond),
             TransactionPayload::ContractCall(TransactionContractCall {
                 address: sender,
                 contract_name: "hello-world".into(),
@@ -2690,9 +2790,10 @@ mod tests {
                     &tx1,
                     &account,
                     ASTRules::PrecheckSize,
+                    None,
                 )
                 .unwrap();
-                assert_eq!(receipt.post_condition_aborted, true);
+                assert!(receipt.post_condition_aborted);
             });
             conn.as_transaction(|clarity_tx| {
                 StacksChainState::process_transaction_payload(
@@ -2700,6 +2801,7 @@ mod tests {
                     &tx2,
                     &account,
                     ASTRules::PrecheckSize,
+                    None,
                 )
                 .unwrap();
             });
@@ -2710,10 +2812,11 @@ mod tests {
                     &tx3,
                     &account,
                     ASTRules::PrecheckSize,
+                    None,
                 )
                 .unwrap();
 
-                assert_eq!(receipt.post_condition_aborted, true);
+                assert!(receipt.post_condition_aborted);
             });
 
             conn.commit_block();
@@ -2859,7 +2962,7 @@ mod tests {
                     .analyze_smart_contract(
                         &contract_identifier,
                         ClarityVersion::Clarity1,
-                        &contract,
+                        contract,
                         ASTRules::PrecheckSize,
                     )
                     .unwrap();
@@ -2867,9 +2970,10 @@ mod tests {
                     &contract_identifier,
                     ClarityVersion::Clarity1,
                     &ct_ast,
-                    &contract,
+                    contract,
                     None,
-                    |_, _| false,
+                    |_, _| None,
+                    None,
                 )
                 .unwrap();
                 conn.save_analysis(&contract_identifier, &ct_analysis)
@@ -2893,7 +2997,8 @@ mod tests {
                     &contract_identifier,
                     "do-expand",
                     &[],
-                    |_, _| false
+                    |_, _| None,
+                    None
                 ))
                 .unwrap_err()
             {

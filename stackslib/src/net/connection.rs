@@ -379,6 +379,7 @@ pub struct ConnectionOptions {
     /// Units are milliseconds.  A value of 0 means "never".
     pub log_neighbors_freq: u64,
     pub inv_sync_interval: u64,
+    // how many reward cycles of blocks to sync in a non-full inventory sync
     pub inv_reward_cycles: u64,
     pub download_interval: u64,
     pub pingback_timeout: u64,
@@ -926,20 +927,22 @@ impl<P: ProtocolFamily> ConnectionInbox<P> {
                 let bytes_consumed = if let Some(ref mut preamble) = preamble_opt {
                     let (message_opt, bytes_consumed) =
                         self.consume_payload(protocol, preamble, &buf[offset..])?;
-                    match message_opt {
-                        Some(message) => {
-                            // queue up
-                            test_debug!(
-                                "Consumed message '{}' (request {}) in {} bytes",
-                                message.get_message_name(),
-                                message.request_id(),
-                                bytes_consumed
-                            );
-                            self.inbox.push_back(message);
-                            consumed_message = true;
+                    if let Some(message) = message_opt {
+                        // queue up
+                        test_debug!(
+                            "Consumed message '{}' (request {}) in {} bytes",
+                            message.get_message_name(),
+                            message.request_id(),
+                            bytes_consumed
+                        );
+                        self.inbox.push_back(message);
+                        consumed_message = true;
+                    } else {
+                        if bytes_consumed == 0 {
+                            warn!("0 bytes consumed, but no message parsed");
+                            return Err(net_error::ConnectionBroken);
                         }
-                        None => {}
-                    };
+                    }
 
                     bytes_consumed
                 } else {
@@ -982,14 +985,11 @@ impl<P: ProtocolFamily> ConnectionInbox<P> {
                     if let Some(ref mut preamble) = preamble_opt {
                         let (message_opt, _bytes_consumed) =
                             self.consume_payload(protocol, preamble, &[])?;
-                        match message_opt {
-                            Some(message) => {
-                                // queue up
-                                test_debug!("Consumed buffered message '{}' (request {}) from {} input buffer bytes", message.get_message_name(), message.request_id(), _bytes_consumed);
-                                self.inbox.push_back(message);
-                                consumed_message = true;
-                            }
-                            None => {}
+                        if let Some(message) = message_opt {
+                            // queue up
+                            test_debug!("Consumed buffered message '{}' (request {}) from {} input buffer bytes", message.get_message_name(), message.request_id(), _bytes_consumed);
+                            self.inbox.push_back(message);
+                            consumed_message = true;
                         }
                     }
                     self.preamble = preamble_opt;
@@ -1547,7 +1547,7 @@ mod test {
         for i in 0..conn.options.outbox_maxlen {
             // send
             if i % 100 == 0 {
-                test_debug!("Generated {} messages...", i);
+                test_debug!("Generated {i} messages...");
             }
             let msg = message_factory(i as u32);
             messages.push(msg);
@@ -1571,9 +1571,9 @@ mod test {
                 protocol.write_message(&mut p, &messages[i]).unwrap();
                 i += 1;
 
-                test_debug!("Flush pipe {}", i);
+                test_debug!("Flush pipe {i}");
                 let _ = p.flush();
-                test_debug!("Flushed pipe {}", i);
+                test_debug!("Flushed pipe {i}");
             }
 
             test_debug!("Pusher exit");
@@ -1602,15 +1602,14 @@ mod test {
                                 thread::yield_now();
                             }
                             if nw > 0 {
-                                test_debug!("Written {} bytes", nw);
+                                test_debug!("Written {nw} bytes");
                             }
                         } else {
                             done = true;
                         }
                     }
                     Err(e) => {
-                        assert!(false, "{:?}", &e);
-                        unreachable!();
+                        panic!("{e:?}");
                     }
                 }
             }
@@ -1621,42 +1620,30 @@ mod test {
         let mut drained = false;
         let mut total_bytes = 0;
         while !drained {
-            match shared_state.lock() {
-                Ok(ref mut conn) => {
-                    // in the foreground, get the messages
-                    let nr = match conn.recv_data(&mut read) {
-                        Ok(cnt) => {
-                            if cnt == 0 {
-                                thread::yield_now();
-                            }
-
-                            cnt
-                        }
-                        Err(e) => match e {
-                            net_error::PermanentlyDrained => {
-                                drained = true;
-                                0
-                            }
-                            _ => {
-                                assert!(false, "{:?}", &e);
-                                unreachable!();
-                            }
-                        },
-                    };
-
-                    if nr > 0 {
-                        test_debug!("Received {} bytes", nr);
-                        total_bytes += nr;
+            let mut conn = shared_state.lock().unwrap_or_else(|e| panic!("{e:?}"));
+            // in the foreground, get the messages
+            let nr = match conn.recv_data(&mut read) {
+                Ok(cnt) => {
+                    if cnt == 0 {
+                        thread::yield_now();
                     }
+
+                    cnt
                 }
-                Err(e) => {
-                    assert!(false, "{:?}", &e);
-                    unreachable!();
+                Err(net_error::PermanentlyDrained) => {
+                    drained = true;
+                    0
                 }
+                Err(e) => panic!("{e:?}"),
+            };
+
+            if nr > 0 {
+                test_debug!("Received {nr} bytes");
+                total_bytes += nr;
             }
         }
 
-        test_debug!("Received {} bytes in total", total_bytes);
+        test_debug!("Received {total_bytes} bytes in total");
 
         match shared_state.lock() {
             Ok(ref mut conn) => {
@@ -1671,9 +1658,9 @@ mod test {
                     conn.outbox.socket_out_ptr
                 );
 
-                assert_eq!(conn.inbox.buf.len(), 0);
+                assert!(conn.inbox.buf.is_empty());
                 assert_eq!(conn.inbox.message_ptr, 0);
-                assert_eq!(conn.outbox.socket_out_buf.len(), 0);
+                assert!(conn.outbox.socket_out_buf.is_empty());
                 assert_eq!(conn.outbox.socket_out_ptr, 0);
 
                 let recved = conn.drain_inbox();
@@ -1681,8 +1668,7 @@ mod test {
                 assert_eq!(recved, expected_messages);
             }
             Err(e) => {
-                assert!(false, "{:?}", &e);
-                unreachable!();
+                panic!("{e:?}");
             }
         }
 
@@ -1734,9 +1720,9 @@ mod test {
                 protocol.write_message(&mut rh, &messages[i]).unwrap();
                 i += 1;
 
-                test_debug!("Flush handle {}", i);
+                test_debug!("Flush handle {i}");
                 let _ = rh.flush();
-                test_debug!("Flushed handle {}", i);
+                test_debug!("Flushed handle {i}");
 
                 rhs.push(rh);
             }
@@ -1765,15 +1751,14 @@ mod test {
                         if conn.outbox.num_messages() > 0 {
                             let nw = conn.send_data(&mut write).unwrap();
                             if nw > 0 {
-                                test_debug!("Written {} bytes", nw);
+                                test_debug!("Written {nw} bytes");
                             }
                         } else {
                             done = true;
                         }
                     }
                     Err(e) => {
-                        assert!(false, "{:?}", &e);
-                        unreachable!();
+                        panic!("{e:?}");
                     }
                 }
             }
@@ -1789,33 +1774,27 @@ mod test {
                     // in the foreground, get the messages
                     let nr = match conn.recv_data(&mut read) {
                         Ok(cnt) => cnt,
-                        Err(e) => match e {
-                            net_error::PermanentlyDrained => {
-                                drained = true;
-                                0
-                            }
-                            _ => {
-                                assert!(false, "{:?}", &e);
-                                unreachable!();
-                            }
-                        },
+                        Err(net_error::PermanentlyDrained) => {
+                            drained = true;
+                            0
+                        }
+                        Err(e) => panic!("{e:?}"),
                     };
 
                     if nr > 0 {
-                        test_debug!("Received {} bytes", nr);
+                        test_debug!("Received {nr} bytes");
                         total_bytes += nr;
                     }
                 }
                 Err(e) => {
-                    assert!(false, "{:?}", &e);
-                    unreachable!();
+                    panic!("{e:?}");
                 }
             }
         }
 
-        test_debug!("Received {} bytes in total", total_bytes);
+        test_debug!("Received {total_bytes} bytes in total");
 
-        let mut flushed_handles = rx.recv().unwrap();
+        let flushed_handles = rx.recv().unwrap();
 
         match shared_state.lock() {
             Ok(ref mut conn) => {
@@ -1830,27 +1809,26 @@ mod test {
                     conn.outbox.socket_out_ptr
                 );
 
-                assert_eq!(conn.inbox.buf.len(), 0);
+                assert!(conn.inbox.buf.is_empty());
                 assert_eq!(conn.inbox.message_ptr, 0);
-                assert_eq!(conn.outbox.socket_out_buf.len(), 0);
+                assert!(conn.outbox.socket_out_buf.is_empty());
                 assert_eq!(conn.outbox.socket_out_ptr, 0);
 
                 // fulfill everything
                 let recved = conn.drain_inbox();
 
                 // everything was sent to the handles -- all solicited
-                assert_eq!(recved.len(), 0);
+                assert!(recved.is_empty());
             }
             Err(e) => {
-                assert!(false, "{:?}", &e);
-                unreachable!();
+                panic!("{e:?}");
             }
         }
 
         // got all messages
         let mut recved = vec![];
-        for (i, rh) in flushed_handles.drain(..).enumerate() {
-            test_debug!("recv {}", i);
+        for (i, rh) in flushed_handles.into_iter().enumerate() {
+            test_debug!("recv {i}");
             let res = rh.recv(0).unwrap();
             recved.push(res);
         }
@@ -1873,7 +1851,7 @@ mod test {
             &BurnchainHeaderHash([0x22; 32]),
             StacksMessageType::Ping(PingData { nonce }),
         );
-        let privkey = Secp256k1PrivateKey::new();
+        let privkey = Secp256k1PrivateKey::random();
         ping.sign(request_id, &privkey).unwrap();
         ping
     }
@@ -1919,7 +1897,7 @@ mod test {
             StacksMessageType::Ping(PingData { nonce: 0x01020304 }),
         );
 
-        let privkey = Secp256k1PrivateKey::new();
+        let privkey = Secp256k1PrivateKey::random();
         ping.sign(1, &privkey).unwrap();
 
         let mut pipes = vec![]; // keep pipes in-scope
@@ -2020,7 +1998,7 @@ mod test {
         // the combined ping buffers should be the serialized ping
         let mut combined_ping_buf = vec![];
         combined_ping_buf.append(&mut half_ping);
-        combined_ping_buf.extend_from_slice(&write_buf_05.get_mut());
+        combined_ping_buf.extend_from_slice(write_buf_05.get_mut());
 
         assert_eq!(combined_ping_buf, serialized_ping);
 
@@ -2036,12 +2014,12 @@ mod test {
         }
 
         assert_eq!(nw, ping_size * 2);
-        assert_eq!(conn.outbox.outbox.len(), 0);
+        assert!(conn.outbox.outbox.is_empty());
     }
 
     #[test]
     fn connection_relay_send_recv() {
-        let privkey = Secp256k1PrivateKey::new();
+        let privkey = Secp256k1PrivateKey::random();
         let pubkey = Secp256k1PublicKey::from_private(&privkey);
 
         let neighbor = Neighbor {
@@ -2139,7 +2117,7 @@ mod test {
     #[test]
     fn connection_send_recv() {
         with_timeout(100, || {
-            let privkey = Secp256k1PrivateKey::new();
+            let privkey = Secp256k1PrivateKey::random();
             let pubkey = Secp256k1PublicKey::from_private(&privkey);
 
             let neighbor = Neighbor {
@@ -2254,7 +2232,7 @@ mod test {
 
     #[test]
     fn connection_send_recv_timeout() {
-        let privkey = Secp256k1PrivateKey::new();
+        let privkey = Secp256k1PrivateKey::random();
         let pubkey = Secp256k1PublicKey::from_private(&privkey);
 
         let neighbor = Neighbor {
@@ -2352,7 +2330,7 @@ mod test {
         conn.drain_timeouts();
 
         // all messages timed out
-        assert_eq!(conn.outbox.inflight.len(), 0);
+        assert!(conn.outbox.inflight.is_empty());
 
         {
             let mut ping_fd = NetCursor::new(ping_buf.as_mut_slice());

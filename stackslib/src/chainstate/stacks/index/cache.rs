@@ -15,6 +15,7 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 use std::char::from_digit;
+use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::io::{BufWriter, Cursor, Read, Seek, SeekFrom, Write};
@@ -137,6 +138,25 @@ impl<T: MarfTrieId> TrieCacheState<T> {
         self.block_hash_cache.get(&block_id).cloned()
     }
 
+    /// Get cached entry for a block hash, given its ID, or, if not
+    ///  found, use `lookup` to get the corresponding block hash and
+    ///  store it in the cache
+    pub fn get_block_hash_caching<E, F: FnOnce(u32) -> Result<T, E>>(
+        &mut self,
+        id: u32,
+        lookup: F,
+    ) -> Result<&T, E> {
+        match self.block_hash_cache.entry(id) {
+            Entry::Occupied(occupied_entry) => Ok(occupied_entry.into_mut()),
+            Entry::Vacant(vacant_entry) => {
+                let block_hash = lookup(id)?;
+                let block_hash_ref = vacant_entry.insert(block_hash.clone());
+                self.block_id_cache.insert(block_hash, id);
+                Ok(block_hash_ref)
+            }
+        }
+    }
+
     /// Cache a block hash, given its ID
     pub fn store_block_hash(&mut self, block_id: u32, block_hash: T) {
         assert!(!self.block_hash_cache.contains_key(&block_id));
@@ -151,7 +171,7 @@ impl<T: MarfTrieId> TrieCacheState<T> {
 
     /// Get the block ID, given its hash
     pub fn load_block_id(&self, block_hash: &T) -> Option<u32> {
-        self.block_id_cache.get(block_hash).map(|id| *id)
+        self.block_id_cache.get(block_hash).copied()
     }
 }
 
@@ -258,12 +278,11 @@ impl<T: MarfTrieId> TrieCache<T> {
             TrieCache::Everything(ref mut state) => {
                 state.store_node_and_hash(block_id, trieptr, node, hash);
             }
-            TrieCache::Node256(ref mut state) => match node {
-                TrieNodeType::Node256(data) => {
+            TrieCache::Node256(ref mut state) => {
+                if let TrieNodeType::Node256(data) = node {
                     state.store_node_and_hash(block_id, trieptr, TrieNodeType::Node256(data), hash);
                 }
-                _ => {}
-            },
+            }
         }
     }
 
@@ -273,12 +292,11 @@ impl<T: MarfTrieId> TrieCache<T> {
         match self {
             TrieCache::Noop(_) => {}
             TrieCache::Everything(ref mut state) => state.store_node(block_id, trieptr, node),
-            TrieCache::Node256(ref mut state) => match node {
-                TrieNodeType::Node256(data) => {
+            TrieCache::Node256(ref mut state) => {
+                if let TrieNodeType::Node256(data) = node {
                     state.store_node(block_id, trieptr, TrieNodeType::Node256(data))
                 }
-                _ => {}
-            },
+            }
         }
     }
 
@@ -309,6 +327,17 @@ impl<T: MarfTrieId> TrieCache<T> {
     /// Load a block's hash, given its block ID.
     pub fn load_block_hash(&mut self, block_id: u32) -> Option<T> {
         self.state_mut().load_block_hash(block_id)
+    }
+
+    /// Get cached entry for a block hash, given its ID, or, if not
+    ///  found, use `lookup` to get the corresponding block hash and
+    ///  store it in the cache
+    pub fn get_block_hash_caching<E, F: FnOnce(u32) -> Result<T, E>>(
+        &mut self,
+        id: u32,
+        lookup: F,
+    ) -> Result<&T, E> {
+        self.state_mut().get_block_hash_caching(id, lookup)
     }
 
     /// Store a block's ID and hash to teh cache.
@@ -468,7 +497,7 @@ pub mod test {
             total_read_time, &read_bench
         );
 
-        let mut bench = write_bench.clone();
+        let mut bench = write_bench;
         bench.add(&read_bench);
 
         eprintln!("MARF bench total: {:#?}", &bench);

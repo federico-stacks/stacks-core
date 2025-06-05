@@ -10,7 +10,7 @@ use libc;
 use stacks::burnchains::bitcoin::address::{BitcoinAddress, LegacyBitcoinAddressType};
 use stacks::burnchains::{Burnchain, Error as burnchain_error};
 use stacks::chainstate::burn::db::sortdb::SortitionDB;
-use stacks::chainstate::burn::BlockSnapshot;
+use stacks::chainstate::burn::{BlockSnapshot, ConsensusHash};
 use stacks::chainstate::coordinator::comm::{CoordinatorChannels, CoordinatorReceivers};
 use stacks::chainstate::coordinator::{
     migrate_chainstate_dbs, static_get_canonical_affirmation_map,
@@ -51,6 +51,14 @@ use crate::{
 pub const STDERR: i32 = 2;
 
 #[cfg(test)]
+#[derive(Clone, Default)]
+pub struct RunLoopField<T>(pub Arc<Mutex<T>>);
+
+#[cfg(not(test))]
+#[derive(Clone, Default)]
+pub struct RunLoopField<T>(pub std::marker::PhantomData<T>);
+
+#[cfg(test)]
 #[derive(Clone)]
 pub struct RunLoopCounter(pub Arc<AtomicU64>);
 
@@ -72,6 +80,13 @@ impl Default for RunLoopCounter {
     #[cfg(not(test))]
     fn default() -> Self {
         Self()
+    }
+}
+
+impl<T: Clone> RunLoopField<Option<T>> {
+    #[cfg(test)]
+    pub fn get(&self) -> T {
+        self.0.lock().unwrap().clone().unwrap()
     }
 }
 
@@ -108,12 +123,20 @@ pub struct Counters {
 
     pub naka_submitted_vrfs: RunLoopCounter,
     pub naka_submitted_commits: RunLoopCounter,
+    /// the burn block height when the last commit was submitted
+    pub naka_submitted_commit_last_burn_height: RunLoopCounter,
     pub naka_mined_blocks: RunLoopCounter,
     pub naka_rejected_blocks: RunLoopCounter,
     pub naka_proposed_blocks: RunLoopCounter,
     pub naka_mined_tenures: RunLoopCounter,
     pub naka_signer_pushed_blocks: RunLoopCounter,
     pub naka_miner_directives: RunLoopCounter,
+    pub naka_submitted_commit_last_stacks_tip: RunLoopCounter,
+    pub naka_submitted_commit_last_commit_amount: RunLoopCounter,
+    pub naka_submitted_commit_last_parent_tenure_id: RunLoopField<Option<ConsensusHash>>,
+
+    pub naka_miner_current_rejections: RunLoopCounter,
+    pub naka_miner_current_rejections_timeout_secs: RunLoopCounter,
 
     #[cfg(test)]
     pub naka_skip_commit_op: TestFlag<bool>,
@@ -139,6 +162,15 @@ impl Counters {
 
     #[cfg(not(test))]
     fn set(_ctr: &RunLoopCounter, _value: u64) {}
+
+    #[cfg(test)]
+    fn update<T: Clone>(ctr: &RunLoopField<Option<T>>, value: &T) {
+        let mut mutex = ctr.0.lock().expect("FATAL: test counter mutext poisoned");
+        let _ = mutex.replace(value.clone());
+    }
+
+    #[cfg(not(test))]
+    fn update<T: Clone>(_ctr: &RunLoopField<Option<T>>, _value: &T) {}
 
     pub fn bump_blocks_processed(&self) {
         Counters::inc(&self.blocks_processed);
@@ -168,8 +200,30 @@ impl Counters {
         Counters::inc(&self.naka_submitted_vrfs);
     }
 
-    pub fn bump_naka_submitted_commits(&self) {
+    pub fn bump_naka_submitted_commits(
+        &self,
+        committed_burn_height: u64,
+        committed_stacks_height: u64,
+        committed_sats_amount: u64,
+        committed_parent_tenure_id: &ConsensusHash,
+    ) {
         Counters::inc(&self.naka_submitted_commits);
+        Counters::set(
+            &self.naka_submitted_commit_last_burn_height,
+            committed_burn_height,
+        );
+        Counters::set(
+            &self.naka_submitted_commit_last_stacks_tip,
+            committed_stacks_height,
+        );
+        Counters::set(
+            &self.naka_submitted_commit_last_commit_amount,
+            committed_sats_amount,
+        );
+        Counters::update(
+            &self.naka_submitted_commit_last_parent_tenure_id,
+            committed_parent_tenure_id,
+        );
     }
 
     pub fn bump_naka_mined_blocks(&self) {
@@ -198,6 +252,14 @@ impl Counters {
 
     pub fn set_microblocks_processed(&self, value: u64) {
         Counters::set(&self.microblocks_processed, value)
+    }
+
+    pub fn set_miner_current_rejections_timeout_secs(&self, value: u64) {
+        Counters::set(&self.naka_miner_current_rejections_timeout_secs, value)
+    }
+
+    pub fn set_miner_current_rejections(&self, value: u32) {
+        Counters::set(&self.naka_miner_current_rejections, u64::from(value))
     }
 }
 
@@ -248,10 +310,11 @@ impl RunLoop {
             config.burnchain.burn_fee_cap,
         )));
 
-        let mut event_dispatcher = EventDispatcher::new();
+        let mut event_dispatcher = EventDispatcher::new(Some(config.get_working_dir()));
         for observer in config.events_observers.iter() {
-            event_dispatcher.register_observer(observer, config.get_working_dir());
+            event_dispatcher.register_observer(observer);
         }
+        event_dispatcher.process_pending_payloads();
 
         Self {
             config,
@@ -381,6 +444,11 @@ impl RunLoop {
     /// If there's a network error, then assume that we're not a miner.
     fn check_is_miner(&mut self, burnchain: &mut BitcoinRegtestController) -> bool {
         if self.config.node.miner {
+            // If we are mock mining, then we don't need to check for UTXOs and
+            // we can just return true.
+            if self.config.get_node_config(false).mock_mining {
+                return true;
+            }
             let keychain = Keychain::default(self.config.node.seed.clone());
             let mut op_signer = keychain.generate_op_signer();
             if let Err(e) = burnchain.create_wallet_if_dne() {
@@ -420,10 +488,6 @@ impl RunLoop {
                         info!("UTXOs found - will run as a Miner node");
                         return true;
                     }
-                }
-                if self.config.get_node_config(false).mock_mining {
-                    info!("No UTXOs found, but configured to mock mine");
-                    return true;
                 }
                 thread::sleep(std::time::Duration::from_secs(Self::UTXO_RETRY_INTERVAL));
             }
@@ -631,6 +695,7 @@ impl RunLoop {
                     require_affirmed_anchor_blocks: moved_config
                         .node
                         .require_affirmed_anchor_blocks,
+                    txindex: moved_config.node.txindex,
                 };
                 ChainsCoordinator::run(
                     coord_config,

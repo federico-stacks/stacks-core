@@ -57,9 +57,8 @@ fn setup_tracked_cost_test(
         .unwrap()
         .unwrap();
 
-    let p1_principal = match p1 {
-        Value::Principal(PrincipalData::Standard(ref data)) => data.clone(),
-        _ => panic!(),
+    let Value::Principal(PrincipalData::Standard(p1_principal)) = p1.clone() else {
+        panic!("Exepected standard principal data");
     };
 
     let contract_trait = "(define-trait trait-1 (
@@ -71,8 +70,7 @@ fn setup_tracked_cost_test(
 
     let other_contract_id =
         QualifiedContractIdentifier::new(p1_principal.clone(), "contract-other".into());
-    let trait_contract_id =
-        QualifiedContractIdentifier::new(p1_principal.clone(), "contract-trait".into());
+    let trait_contract_id = QualifiedContractIdentifier::new(p1_principal, "contract-trait".into());
 
     let burn_state_db = UnitTestBurnStateDB {
         epoch_id: epoch,
@@ -133,7 +131,8 @@ fn setup_tracked_cost_test(
                 &ct_ast,
                 contract_trait,
                 None,
-                |_, _| false,
+                |_, _| None,
+                None,
             )
             .unwrap();
             conn.save_analysis(&trait_contract_id, &ct_analysis)
@@ -166,7 +165,8 @@ fn setup_tracked_cost_test(
                 &ct_ast,
                 contract_other,
                 None,
-                |_, _| false,
+                |_, _| None,
+                None,
             )
             .unwrap();
             conn.save_analysis(&other_contract_id, &ct_analysis)
@@ -204,14 +204,13 @@ fn test_tracked_costs(
         .unwrap()
         .unwrap();
 
-    let p1_principal = match p1 {
-        Value::Principal(PrincipalData::Standard(ref data)) => data.clone(),
-        _ => panic!(),
+    let Value::Principal(PrincipalData::Standard(p1_principal)) = p1.clone() else {
+        panic!("Exepected standard principal data");
     };
 
     let self_contract_id = QualifiedContractIdentifier::new(
-        p1_principal.clone(),
-        ContractName::try_from(format!("self-{}", prog_id)).unwrap(),
+        p1_principal,
+        ContractName::try_from(format!("self-{prog_id}")).unwrap(),
     );
 
     let burn_state_db = UnitTestBurnStateDB {
@@ -242,7 +241,8 @@ fn test_tracked_costs(
                 &ct_ast,
                 &contract_self,
                 None,
-                |_, _| false,
+                |_, _| None,
+                None,
             )
             .unwrap();
             conn.save_analysis(&self_contract_id, &ct_analysis).unwrap();

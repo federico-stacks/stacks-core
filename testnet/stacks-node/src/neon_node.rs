@@ -223,6 +223,7 @@ use crate::burnchains::bitcoin_regtest_controller::{
 };
 use crate::burnchains::{make_bitcoin_indexer, Error as BurnchainControllerError};
 use crate::globals::{NeonGlobals as Globals, RelayerDirective};
+use crate::nakamoto_node::miner_db::MinerDB;
 use crate::nakamoto_node::signer_coordinator::SignerCoordinator;
 use crate::run_loop::neon::RunLoop;
 use crate::run_loop::RegisteredKey;
@@ -1730,6 +1731,17 @@ impl BlockMinerThread {
             )
         };
 
+        let Some(vrf_proof) = vrf_proof else {
+            error!(
+                "Unable to generate VRF proof, will be unable to mine";
+                "burn_block_sortition_hash" => %self.burn_block.sortition_hash,
+                "burn_block_block_height" => %self.burn_block.block_height,
+                "burn_block_hash" => %self.burn_block.burn_header_hash,
+                "vrf_pubkey" => &self.registered_key.vrf_public_key.to_hex()
+            );
+            return None;
+        };
+
         debug!(
             "Generated VRF Proof: {} over {} ({},{}) with key {}",
             vrf_proof.to_hex(),
@@ -2211,12 +2223,7 @@ impl BlockMinerThread {
     /// Only used in mock signing to generate a peer info view
     fn generate_peer_info(&self) -> PeerInfo {
         // Create a peer info view of the current state
-        let server_version = version_string(
-            "stacks-node",
-            option_env!("STACKS_NODE_VERSION")
-                .or(option_env!("CARGO_PKG_VERSION"))
-                .unwrap_or("0.0.0.0"),
-        );
+        let server_version = version_string("stacks-node", option_env!("STACKS_NODE_VERSION"));
         let stacks_tip_height = self.burn_block.canonical_stacks_tip_height;
         let stacks_tip = self.burn_block.canonical_stacks_tip_hash;
         let stacks_tip_consensus_hash = self.burn_block.canonical_stacks_tip_consensus_hash;
@@ -2360,6 +2367,7 @@ impl BlockMinerThread {
         let miner_contract_id = boot_code_id(MINERS_NAME, self.config.is_mainnet());
         let mut miners_stackerdb =
             StackerDBSession::new(&self.config.node.rpc_bind, miner_contract_id);
+        let miner_db = MinerDB::open_with_config(&self.config).map_err(|e| e.to_string())?;
 
         SignerCoordinator::send_miners_message(
             &mining_key,
@@ -2371,6 +2379,7 @@ impl BlockMinerThread {
             self.config.is_mainnet(),
             &mut miners_stackerdb,
             &election_sortition,
+            &miner_db,
         )
         .map_err(|e| {
             warn!("Failed to write mock proposal to stackerdb.");
@@ -2394,11 +2403,12 @@ impl BlockMinerThread {
             &burn_db,
             &self.burn_block,
             &stackerdbs,
-            SignerMessage::MockBlock(mock_block.clone()),
+            SignerMessage::MockBlock(mock_block),
             MinerSlotID::BlockPushed, // There is no specific slot for mock miner messages. Let's use BlockPushed for MockBlock since MockProposal uses BlockProposal.
             self.config.is_mainnet(),
             &mut miners_stackerdb,
             &election_sortition,
+            &miner_db,
         )
         .map_err(|e| {
             warn!("Failed to write mock block to stackerdb.");
@@ -3755,7 +3765,7 @@ impl RelayerThread {
         }
 
         let Some(mut miner_thread_state) =
-            self.create_block_miner(registered_key, last_burn_block.clone(), issue_timestamp_ms)
+            self.create_block_miner(registered_key, last_burn_block, issue_timestamp_ms)
         else {
             return false;
         };
@@ -4485,6 +4495,8 @@ impl PeerThread {
             p2p_thread.globals.recv_unconfirmed_txs(chainstate);
         });
 
+        let txindex = self.config.node.txindex;
+
         // do one pass
         let p2p_res = self.with_chainstate(|p2p_thread, sortdb, chainstate, mempool| {
             // NOTE: handler_args must be created such that it outlives the inner net.run() call and
@@ -4510,6 +4522,7 @@ impl PeerThread {
                     ibd,
                     poll_ms,
                     &handler_args,
+                    txindex,
                 )
             })
         });

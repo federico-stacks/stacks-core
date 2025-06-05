@@ -160,7 +160,17 @@ pub const NAKAMOTO_STAGING_DB_SCHEMA_3: &[&str] = &[
     r#"UPDATE db_version SET version = 3"#,
 ];
 
-pub const NAKAMOTO_STAGING_DB_SCHEMA_LATEST: u32 = 3;
+pub const NAKAMOTO_STAGING_DB_SCHEMA_4: &[&str] = &[
+    r#"CREATE INDEX nakamoto_staging_blocks_by_ready_and_height ON nakamoto_staging_blocks(burn_attachable, orphaned, processed, height);"#,
+    r#"UPDATE db_version SET version = 4"#,
+];
+
+pub const NAKAMOTO_STAGING_DB_SCHEMA_5: &[&str] = &[
+    r#"CREATE INDEX nakamoto_staging_blocks_by_consensus_hash_and_processed ON nakamoto_staging_blocks(consensus_hash, processed);"#,
+    r#"UPDATE db_version SET version = 5"#,
+];
+
+pub const NAKAMOTO_STAGING_DB_SCHEMA_LATEST: u32 = 5;
 
 pub struct NakamotoStagingBlocksConn(rusqlite::Connection);
 
@@ -428,6 +438,30 @@ impl<'a> NakamotoStagingBlocksConnRef<'a> {
             .collect())
     }
 
+    /// Get all nakamoto blocks in a tenure
+    pub fn get_nakamoto_blocks_in_tenure(
+        &self,
+        consensus_hash: &ConsensusHash,
+    ) -> Result<Vec<NakamotoBlock>, ChainstateError> {
+        let qry =
+            "SELECT data FROM nakamoto_staging_blocks WHERE consensus_hash = ?1 AND processed = 1";
+        let args = params![consensus_hash];
+        let block_data: Vec<Vec<u8>> = query_rows(self, qry, args)?;
+        Ok(block_data
+            .into_iter()
+            .filter_map(|block_vec| {
+                NakamotoBlock::consensus_deserialize(&mut &block_vec[..])
+                    .map_err(|e| {
+                        error!("Failed to deserialize block from DB, likely database corruption";
+                               "consensus_hash" => %consensus_hash,
+                               "error" => ?e);
+                        e
+                    })
+                    .ok()
+            })
+            .collect())
+    }
+
     /// Find the next ready-to-process Nakamoto block, given a connection to the staging blocks DB.
     /// NOTE: the relevant field queried from `nakamoto_staging_blocks` are updated by a separate
     /// tx from block-processing, so it's imperative that the thread that calls this function is
@@ -520,7 +554,7 @@ impl NakamotoStagingBlocksTx<'_> {
             "UPDATE nakamoto_staging_blocks SET processed = 1, processed_time = ?2
                                   WHERE index_block_hash = ?1";
         self.execute(
-            &clear_staged_block,
+            clear_staged_block,
             params![block, u64_to_sql(get_epoch_time_secs())?],
         )?;
 
@@ -534,13 +568,13 @@ impl NakamotoStagingBlocksTx<'_> {
         let update_dependents = "UPDATE nakamoto_staging_blocks SET orphaned = 1
                                  WHERE parent_block_id = ?";
 
-        self.execute(&update_dependents, &[&block])?;
+        self.execute(update_dependents, &[&block])?;
 
         let clear_staged_block =
             "UPDATE nakamoto_staging_blocks SET processed = 1, processed_time = ?2, orphaned = 1
                                   WHERE index_block_hash = ?1";
         self.execute(
-            &clear_staged_block,
+            clear_staged_block,
             params![block, u64_to_sql(get_epoch_time_secs())?],
         )?;
 
@@ -555,7 +589,7 @@ impl NakamotoStagingBlocksTx<'_> {
     ) -> Result<(), ChainstateError> {
         let update_dependents = "UPDATE nakamoto_staging_blocks SET burn_attachable = 1
                                  WHERE consensus_hash = ?";
-        self.execute(&update_dependents, &[consensus_hash])?;
+        self.execute(update_dependents, &[consensus_hash])?;
 
         Ok(())
     }
@@ -743,13 +777,13 @@ impl StacksChainState {
     pub fn get_nakamoto_staging_blocks_db_version(
         conn: &Connection,
     ) -> Result<u32, ChainstateError> {
-        let db_version_exists = table_exists(&conn, "db_version")?;
+        let db_version_exists = table_exists(conn, "db_version")?;
         if !db_version_exists {
             return Ok(1);
         }
         let qry = "SELECT version FROM db_version ORDER BY version DESC LIMIT 1";
         let args = NO_PARAMS;
-        let version: Option<i64> = match query_row(&conn, qry, args) {
+        let version: Option<i64> = match query_row(conn, qry, args) {
             Ok(x) => x,
             Err(e) => {
                 error!("Failed to get Nakamoto staging blocks DB version: {:?}", &e);
@@ -795,6 +829,24 @@ impl StacksChainState {
                     let version = Self::get_nakamoto_staging_blocks_db_version(conn)?;
                     assert_eq!(version, 3, "Nakamoto staging DB migration failure");
                     debug!("Migrated Nakamoto staging blocks DB to schema 3");
+                }
+                3 => {
+                    debug!("Migrate Nakamoto staging blocks DB to schema 3");
+                    for cmd in NAKAMOTO_STAGING_DB_SCHEMA_4.iter() {
+                        conn.execute(cmd, NO_PARAMS)?;
+                    }
+                    let version = Self::get_nakamoto_staging_blocks_db_version(conn)?;
+                    assert_eq!(version, 4, "Nakamoto staging DB migration failure");
+                    debug!("Migrated Nakamoto staging blocks DB to schema 3");
+                }
+                4 => {
+                    debug!("Migrate Nakamoto staging blocks DB to schema 5");
+                    for cmd in NAKAMOTO_STAGING_DB_SCHEMA_5.iter() {
+                        conn.execute(cmd, NO_PARAMS)?;
+                    }
+                    let version = Self::get_nakamoto_staging_blocks_db_version(conn)?;
+                    assert_eq!(version, 5, "Nakamoto staging DB migration failure");
+                    debug!("Migrated Nakamoto staging blocks DB to schema 5");
                 }
                 NAKAMOTO_STAGING_DB_SCHEMA_LATEST => {
                     break;
