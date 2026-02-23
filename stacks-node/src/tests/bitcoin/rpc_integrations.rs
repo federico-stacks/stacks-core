@@ -49,8 +49,13 @@ mod utils {
     const BITCOIN_IMAGE_TAG_FALLBACK: &str = "25";
 
     pub fn get_bitcoin_image_tag() -> String {
+        let is_ci = env::var("CI").unwrap_or_default() == "true";
+
         match env::var(ENV_BITCOIN_IMAGE_TAG) {
             Ok(tag) if !tag.trim().is_empty() => tag,
+            _ if is_ci => panic!(
+                "Environment variable `{ENV_BITCOIN_IMAGE_TAG}` is required when running in CI",
+            ),
             _ => BITCOIN_IMAGE_TAG_FALLBACK.to_string(),
         }
     }
