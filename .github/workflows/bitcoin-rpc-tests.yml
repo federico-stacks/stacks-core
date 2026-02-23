@@ -65,7 +65,8 @@ jobs:
       - name: Run tests on bitcoind:${{ matrix.bitcoin_version }}
         timeout-minutes: ${{ fromJSON(env.TEST_TIMEOUT) }}
         env:
-          BITCOIN_IMAGE_TAG: ${{ matrix.bitcoin_version }}
+          #BITCOIN_IMAGE_TAG: ${{ matrix.bitcoin_version }}
+          FOO: 1
         run: |
           cargo nextest run \
             --archive-file ~/test_archive.tar.zst \

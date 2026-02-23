@@ -47,9 +47,16 @@ mod utils {
 
     const ENV_BITCOIN_IMAGE_TAG: &str = "BITCOIN_IMAGE_TAG";
     const BITCOIN_IMAGE_TAG_FALLBACK: &str = "25";
+    const ENV_CI: &str = "CI";
 
     pub fn get_bitcoin_image_tag() -> String {
-        let is_ci = env::var("CI").unwrap_or_default() == "true";
+        let is_ci = match env::var(ENV_CI) {
+            Ok(val) => {
+                let v = val.trim().to_ascii_lowercase();
+                matches!(v.as_str(), "1" | "true" | "yes")
+            }
+            Err(_) => false,
+        };
 
         match env::var(ENV_BITCOIN_IMAGE_TAG) {
             Ok(tag) if !tag.trim().is_empty() => tag,
