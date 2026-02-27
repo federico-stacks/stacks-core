@@ -31,6 +31,18 @@ concurrency:
 run-name: ${{ github.ref_name }}
 
 jobs:
+  hello:
+    name: Hello
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - name: Print
+        id: print
+        run: echo "HELLO"
+
   ## Create a reusable cache for tests
   ##
   ## Runs when:
