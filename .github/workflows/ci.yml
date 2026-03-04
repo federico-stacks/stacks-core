@@ -38,3 +38,9 @@ jobs:
       - name: hello
         run: |
           echo "Hello"
+  create-cache:
+    if: 
+      github.event_name == 'workflow_dispatch' ||
+      github.event_name == 'pull_request'
+    name: Create Test Cache
+    uses: ./.github/workflows/create-cache.yml
