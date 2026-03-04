@@ -57,6 +57,13 @@ jobs:
     outputs:
       ready: ${{ steps.count.outputs.ready }}
     steps:
+      - name: Debug scope
+        run: |
+          echo "GITHUB_REF=$GITHUB_REF"
+          echo "GITHUB_SHA=$GITHUB_SHA"
+          echo "GITHUB_HEAD_REF=$GITHUB_HEAD_REF"
+          echo "github.sha=${{ github.sha }}"
+          echo "event.pr.head.sha=${{ github.event.pull_request.head.sha }}"
       - name: Count current approvals
         id: count
         env:
