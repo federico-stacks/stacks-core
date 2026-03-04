@@ -155,6 +155,21 @@ jobs:
       needs.check-changes.outputs.found == 'true'
     runs-on: ubuntu-latest
     steps:
+      ## Debug: try restoring the cargo cache directly using the same action
+      ## version (v4.2.3) as the save step, bypassing the retry wrapper and v4.2.1.
+      ## If this succeeds but testenv's restore fails, the v4.2.1 vs v4.2.3
+      ## version hash mismatch is confirmed as the root cause.
+      - name: Debug direct cargo cache restore
+        uses: actions/cache/restore@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+          key: stacks-core-${{ github.event.pull_request.head.sha }}-cargo
+          fail-on-cache-miss: false
+
       ## Setup test environment: try restoring `testenv` for HEAD.
       ## Allows the job to proceed even if the cache restore fails.
       ## The fallback steps will build the archive from source in that case.
