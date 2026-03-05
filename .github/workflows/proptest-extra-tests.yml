@@ -213,14 +213,21 @@ jobs:
       ## it to list its tests.
       ##
       ## CARGO_TARGET_DIR is pointed at the HEAD workspace's target/ directory.
-      ## Anything unchanged between HEAD and BASE (external deps and 
-      ## unmodified stacks-core crates) is reused, so only the crates 
+      ## Anything unchanged between HEAD and BASE (external deps and
+      ## unmodified stacks-core crates) is reused, so only the crates
       ## that actually differ need recompiling.
       ##
       ## NOTE: Overwriting HEAD binaries in target/ is harmless. The test-run step
       ## uses --archive-file, which extracts HEAD binaries from the archive into
       ## a temp dir and never reads from target/.
+      ##
+      ## RUSTFLAGS must match whatever built the artifacts in target/ so that
+      ## Rust fingerprints align and only the delta crates are recompiled:
+      ## - testenv succeeded (cache hit): target/ was built with coverage flags
+      ## - testenv failed (fallback build): target/ was built without any flags
       - name: List BASE branch tests
+        env:
+          RUSTFLAGS: ${{ steps.setup_tests.outcome == 'success' && '-Cinstrument-coverage -Awarnings' || '' }}
         run: |
           base_ref="${{ github.event.pull_request.base.ref || inputs.base_ref }}"
           echo "Base branch: $base_ref"
