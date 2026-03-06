@@ -22,6 +22,8 @@ mod core_controller_integrations;
 mod proptest_examples {
     use proptest::prelude::*;
 
+    use pinny::tag;
+
     proptest! {
         #[test]
         fn proptest_reverse_twice_is_identity(values in proptest::collection::vec(any::<u8>(), 0..64)) {
@@ -33,6 +35,13 @@ mod proptest_examples {
 
         #[test]
         fn prop_proptest_cases_is_2500(_seed in any::<u8>()) {
+            let proptest_cases = std::env::var("PROPTEST_CASES").unwrap_or_default();
+            prop_assert_eq!(proptest_cases, "2500");
+        }
+
+        #[tag(prop)]
+        #[test]
+        fn another_proptest_cases_is_2500(_seed in any::<u8>()) {
             let proptest_cases = std::env::var("PROPTEST_CASES").unwrap_or_default();
             prop_assert_eq!(proptest_cases, "2500");
         }
