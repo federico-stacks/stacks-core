@@ -29,6 +29,11 @@ on:
         required: false
         default: "develop"
         type: string
+      pr_number:
+        description: "PR number to allow stateful run (default: none)"
+        required: false
+        default: ""
+        type: string
 
 defaults:
   run:
@@ -36,7 +41,7 @@ defaults:
 
 ## Allow the job to be canceled when in progress due to new approval
 concurrency:
-  group: proptest-extra-${{ github.event.pull_request.number || github.run_id }}
+  group: proptest-extra-${{ github.event.pull_request.number || inputs.pr_number || github.run_id }}
   cancel-in-progress: true
 
 env:
@@ -275,6 +280,15 @@ jobs:
             echo "No new proptest tests discovered in this PR."
           fi
 
+      ## Restore proptest regression files (if any) persisted from a previous run.
+      ## Proptest reads these automatically to replay failing seeds.
+      - name: Restore proptest regression files
+        continue-on-error: true
+        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6.0.0
+        with:
+          name: proptest-regressions-pr-${{ github.event.pull_request.number || inputs.pr_number || github.run_id }}
+          path: .
+
       ## Run each new proptest test with an elevated `PROPTEST_CASES` value.
       ## The step fails if any individual test fails.
       - name: Run new tests (PROPTEST_CASES=${{ env.PROPTEST_CASES }})
@@ -289,3 +303,13 @@ jobs:
               -E "test(=$test_name)"
             echo "::endgroup::"
           done < /tmp/new-prop-tests.txt
+
+      ## Persist proptest regression files (if any) for a potential next run.
+      - name: Save proptest regression files
+        if: always()
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
+        with:
+          name: proptest-regressions-pr-${{ github.event.pull_request.number || inputs.pr_number || github.run_id }}
+          path: "**/proptest-regressions/"
+          if-no-files-found: ignore
+          overwrite: true
