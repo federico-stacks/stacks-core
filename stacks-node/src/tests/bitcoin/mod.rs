@@ -50,7 +50,12 @@ mod proptest_examples {
         #[test]
         fn failing_proptest(_seed in any::<u8>()) {
             let proptest_cases = std::env::var("PROPTEST_CASES").unwrap_or_default();
-            prop_assert_ne!(proptest_cases, "2500");
+            if _seed == 0 { // make the failing stored seed pass
+                prop_assert_eq!(proptest_cases, "2500");
+            } else {  // make failing with a new seed
+                prop_assert_ne!(proptest_cases, "2500");
+            }
+
         }
     }
 }
