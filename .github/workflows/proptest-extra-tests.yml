@@ -282,7 +282,7 @@ jobs:
 
       ## Restore proptest regression files (if any) persisted from a previous run.
       ## Proptest reads these automatically to replay failing seeds.
-      - name: Restore proptest regression files
+      - name: Restore proptest regression (if any)
         continue-on-error: true
         uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6.0.0
         with:
@@ -305,7 +305,7 @@ jobs:
           done < /tmp/new-prop-tests.txt
 
       ## Persist proptest regression files (if any) for a potential next run.
-      - name: Save proptest regression files
+      - name: Save proptest regression (if any)
         if: always()
         uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
         with:
