@@ -294,6 +294,7 @@ jobs:
       ## Run each new proptest test with an elevated `PROPTEST_CASES` value.
       ## The step fails if any individual test fails.
       - name: Run new tests (PROPTEST_CASES=${{ env.PROPTEST_CASES }})
+        id: run_tests
         if: steps.discover.outputs.count != '0'
         timeout-minutes: ${{ fromJSON(env.TEST_TIMEOUT) }}
         run: |
@@ -303,7 +304,12 @@ jobs:
             cargo nextest run \
               --archive-file ~/test_archive.tar.zst \
               -E "test(=$test_name)"
+            exit_code=$?
             echo "::endgroup::"
+            if [ $exit_code -ne 0 ]; then
+              echo "$test_name" > /tmp/failed-prop-tests.txt
+              exit $exit_code
+            fi
           done < /tmp/new-prop-tests.txt
 
       ## Persist proptest regression files (if any) for a potential next run.
@@ -321,27 +327,27 @@ jobs:
       ## linking to the run, and naming the artifact that holds the regression seeds.
       ## Skipped when there is no PR context (workflow_dispatch without pr_number).
       - name: Report proptest failure on PR
-        if: failure()
+        if: >
+          steps.run_tests.outcome == 'failure' &&
+          (github.event.pull_request.number || inputs.pr_number)
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           pr="${{ github.event.pull_request.number || inputs.pr_number }}"
-          [[ -z "$pr" ]] && echo "No PR context — skipping comment" && exit 0
-
           run_url="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-          artifact="proptest-regressions-pr-$pr"
-          failed_tests=$(cat /tmp/new-prop-tests.txt 2>/dev/null || echo "(unknown)")
+          failed_tests=$(cat /tmp/failed-prop-tests.txt 2>/dev/null || echo "(unknown)")
 
           body="<!-- proptest-regression-report -->
           **Proptest failures detected**
 
-          The following tests failed. Failing seeds were saved to artifact \`$artifact\` and will be replayed on the next run.
+          The following tests failed:
 
           \`\`\`
           $failed_tests
           \`\`\`
 
-          [View run and artifacts]($run_url)"
+          Proptest regression seeds were saved as artifact and will be replayed on the next run.
+          [View run and artifact]($run_url)"
 
           existing=$(gh api \
             "repos/${{ github.repository }}/issues/$pr/comments" \
