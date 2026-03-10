@@ -171,6 +171,8 @@ jobs:
       needs.check-approvals.outputs.ready == 'true' &&
       needs.check-changes.outputs.found == 'true'
     runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
     steps:
       ## Setup test environment: try restoring `testenv` for HEAD.
       ## Allows the job to proceed even if the cache restore fails.
@@ -314,3 +316,43 @@ jobs:
           path: "**/proptest-regressions/"
           if-no-files-found: ignore
           overwrite: true
+
+      ## On failure, post (or update) a PR comment listing the failed tests,
+      ## linking to the run, and naming the artifact that holds the regression seeds.
+      ## Skipped when there is no PR context (workflow_dispatch without pr_number).
+      - name: Report proptest failure on PR
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          pr="${{ github.event.pull_request.number || inputs.pr_number }}"
+          [[ -z "$pr" ]] && echo "No PR context — skipping comment" && exit 0
+
+          run_url="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          artifact="proptest-regressions-pr-$pr"
+          failed_tests=$(cat /tmp/new-prop-tests.txt 2>/dev/null || echo "(unknown)")
+
+          body="<!-- proptest-regression-report -->
+          **Proptest failures detected**
+
+          The following tests failed. Failing seeds were saved to artifact \`$artifact\` and will be replayed on the next run.
+
+          \`\`\`
+          $failed_tests
+          \`\`\`
+
+          [View run and artifacts]($run_url)"
+
+          existing=$(gh api \
+            "repos/${{ github.repository }}/issues/$pr/comments" \
+            --jq '[.[] | select(.body | startswith("<!-- proptest-regression-report -->"))][0].id // empty')
+
+          if [[ -n "$existing" ]]; then
+            gh api "repos/${{ github.repository }}/issues/comments/$existing" \
+              -X PATCH --field body="$body"
+            echo "Updated existing comment $existing"
+          else
+            gh api "repos/${{ github.repository }}/issues/$pr/comments" \
+              -X POST --field body="$body"
+            echo "Posted new comment"
+          fi
