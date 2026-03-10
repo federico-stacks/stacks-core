@@ -328,6 +328,7 @@ jobs:
       ## Skipped when there is no PR context (workflow_dispatch without pr_number).
       - name: Report proptest failure on PR
         if: >
+          always() &&
           steps.run_tests.outcome == 'failure' &&
           (github.event.pull_request.number || inputs.pr_number)
         env:
