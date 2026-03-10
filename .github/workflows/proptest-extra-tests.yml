@@ -1,16 +1,21 @@
 ## GitHub workflow to run newly introduced proptests with higher case counts.
 ##
+## This works for tests tagged with `prop` tag like this:
+##  
+## [tag(prop)]
+## fn my_prop_test() { ... }
+##
 ## Triggered by PR review events (submitted/dismissed) and manual dispatch.
 ## Manual dispatch always runs; PR-review runs proceed only for approved
 ## reviews targeting the develop base branch.
 ##
 ## It uses two gates: approval threshold first, then quick diff detection of
-## new proptest tests, to avoid expensive runs when not needed.
+## new proptest tests (tag based), to avoid expensive runs when not needed.
 ##
 ## Discovery strategy:
 ##   - HEAD: list tests from nextest archive (cache restore when available)
 ##   - BASE: compile/list tests in a temporary git worktree
-##   - New tests: tests present in HEAD but not in BASE
+##   - New tests: tagged tests present in HEAD but not in BASE
 
 name: Tests::Proptest Extra
 
@@ -39,15 +44,15 @@ env:
   SEGMENT_DOWNLOAD_TIMEOUT_MINS: 3
   TEST_TIMEOUT: 30
   ## Minimum number of PR approvals required before running the tests
-  REQUIRED_APPROVALS: 1  ## TODO: Set to 2
+  REQUIRED_APPROVALS: 1
   ## Number of generated cases to run per selected proptest.
   PROPTEST_CASES: 2500
 
 jobs:
   ## Gate 1: on manual dispatch, always proceed.
-  ## On pull_request_review, proceed only for approved reviews targeting
-  ## the `develop` base branch, then count current (non-dismissed) approvals
-  ## via the GitHub API and enforce `REQUIRED_APPROVALS`.
+  ## On pull_request_review, proceed only when the triggering review is an
+  ## approval targeting the `develop` base branch and check approvals 
+  ## from users with write+ permission to be at least `REQUIRED_APPROVALS`.
   check-approvals:
     name: Check Approval Count
     if: > 
@@ -70,7 +75,7 @@ jobs:
 
           ## Fetch all reviews and compute the latest state per reviewer.
           ## A user who approved and then dismissed counts as dismissed (not approved).
-          count=$(gh api \
+          approvers=$(gh api \
             "repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/reviews" \
             --jq '
               reduce .[] as $r ({};
@@ -78,12 +83,26 @@ jobs:
               )
               | to_entries
               | map(select(.value == "APPROVED"))
-              | length
+              | .[].key
             ')
+
+          ## Count only approvals from users with write+ permission.
+          count=0
+          for user in $approvers; do
+            perm=$(gh api \
+              "repos/${{ github.repository }}/collaborators/$user/permission" \
+              --jq '.permission' 2>/dev/null || echo "none")
+            if [[ "$perm" == "write" || "$perm" == "maintain" || "$perm" == "admin" ]]; then
+              echo "Counting approval from $user (permission: $perm)"
+              count=$((count + 1))
+            else
+              echo "Skipping approval from $user (permission: $perm)"
+            fi
+          done
 
           echo "Current approval count: $count (required: ${{ env.REQUIRED_APPROVALS }})"
 
-          ## Run only when approvals exactly match REQUIRED_APPROVALS.
+          ## Run only when approvals reach REQUIRED_APPROVALS.
           ## This helps avoid extra reruns triggered by later approvals
           ## that would otherwise be queued by the concurrency setting.
           if [ "$count" -ge "${{ env.REQUIRED_APPROVALS }}" ]; then
@@ -109,8 +128,8 @@ jobs:
           fetch-depth: 0
 
       ## Quick diff scan: detect whether the PR introduces any new proptest test
-      ## looking for functions starting with "prop_" or "proptest_",
-      ## within files using "proptest!" macro, so we can skip full discovery when there are none.
+      ## looking for the attribute #[tag(..., prop, ...)] on added lines,
+      ## so we can skip full discovery when there are none.
       - name: Detect new proptest tests (git diff)
         id: detect
         run: |
@@ -120,16 +139,14 @@ jobs:
           found=false
           ## For each .rs file that was added or modified in the PR...
           while IFS= read -r file; do
-            ## ...consider only files that already contain the proptest! macro
-            if grep -q 'proptest!' "$file" 2>/dev/null; then
-              ## ...check if any added line introduces a fn prop_ or fn proptest_
-              if git diff "origin/$base_ref" -- "$file" \
-                   | grep '^+[^+]' \
-                   | grep -qE 'fn\s+(prop_|proptest_)'; then
-                echo "Found new proptest function in: $file"
-                found=true
-                break
-              fi
+            ## ...check if any added line contains #[tag(..., prop, ...)]
+            ## The tag list may have multiple comma-separated keywords with optional spaces.
+            if git diff "origin/$base_ref" -- "$file" \
+                 | grep '^+[^+]' \
+                 | grep -qP '#\[tag\([^)]*\bprop\b[^)]*\)\]'; then
+              echo "Found new proptest tag in: $file"
+              found=true
+              break
             fi
           done < <(git diff "origin/$base_ref" --name-only --diff-filter=AM -- '*.rs')
 
@@ -141,6 +158,8 @@ jobs:
           fi
 
   proptests-run:
+    ## NOTE: This job name is used as a required Status Check in branch
+    ## protection rules. Renaming requires branch protection to be updated too.
     name: Run New Proptest Tests
     needs: [check-approvals, check-changes]
     if: |
@@ -191,13 +210,22 @@ jobs:
       ## it to list its tests.
       ##
       ## CARGO_TARGET_DIR is pointed at the HEAD workspace's target/ directory.
-      ## Anything unchanged between HEAD and BASE (external deps and 
-      ## unmodified stacks-core crates) is reused, so only the crates 
+      ## Anything unchanged between HEAD and BASE (external deps and
+      ## unmodified stacks-core crates) is reused, so only the crates
       ## that actually differ need recompiling.
       ##
-      ## NOTE: Overwriting HEAD binaries in target/ is harmless. The test-run step
-      ## uses --archive-file, which extracts HEAD binaries from the archive into
-      ## a temp dir and never reads from target/.
+      ## NOTE: 
+      ## Overwriting HEAD binaries in target/ is harmless — the test-run step
+      ## uses --archive-file, which extracts HEAD binaries into a temp dir and
+      ## never reads from target/.
+      ##
+      ## Reusing HEAD's target/ is only effective when testenv fell back to a local
+      ## build (cache miss): that build uses no special RUSTFLAGS, so the artifacts
+      ## are compatible and Rust only recompiles the crates that differ from BASE.
+      ## When testenv succeeds (cache hit), target/ contains artifacts built with
+      ## -Cinstrument-coverage (from create-cache). The flag mismatch invalidates
+      ## every fingerprint, forcing a full recompile regardless — no faster than
+      ## using a fresh target directory (and it not worthy using same flag either).
       - name: List BASE branch tests
         run: |
           base_ref="${{ github.event.pull_request.base.ref || inputs.base_ref }}"
@@ -229,13 +257,14 @@ jobs:
           echo "Base tests: $(wc -l < /tmp/base-tests.txt)"
 
       ## Compare the HEAD and base test lists and keep only tests that are new in HEAD.
-      ## Then filter to only those whose function name (last :: segment) starts
-      ## with "prop_" or "proptest_", consistent with the detection step above.
+      ## Then filter to only those tagged with :t::...:prop:, i.e. test names of the form:
+      ##   mod1::mod2::testname::t::prop::t
+      ##   mod1::mod2::testname::t::other::prop::t
       - name: Discover new tests
         id: discover
         run: |
           comm -23 /tmp/head-tests.txt /tmp/base-tests.txt \
-            | grep -E '(^|::)(prop_|proptest_)[^:]*$' \
+            | grep -P ':t::(?:.*::)?prop::' \
             > /tmp/new-prop-tests.txt || true
           count=$(wc -l < /tmp/new-prop-tests.txt | tr -d ' ')
           echo "count=$count" >> "$GITHUB_OUTPUT"
