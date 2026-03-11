@@ -357,11 +357,10 @@ jobs:
             --jq '[.[] | select(.body | startswith("<!-- proptest-regression-report -->"))][0].id // empty')
 
           if [[ -n "$existing" ]]; then
-            gh api "repos/${{ github.repository }}/issues/comments/$existing" \
-              -X PATCH --field body="$body"
-            echo "Updated existing comment $existing"
-          else
-            gh api "repos/${{ github.repository }}/issues/$pr/comments" \
-              -X POST --field body="$body"
-            echo "Posted new comment"
+            gh api "repos/${{ github.repository }}/issues/comments/$existing" -X DELETE
+            echo "Deleted previous comment $existing"
           fi
+
+          gh api "repos/${{ github.repository }}/issues/$pr/comments" \
+            -X POST --field body="$body"
+          echo "Posted new comment"
