@@ -319,14 +319,13 @@ jobs:
         timeout-minutes: ${{ fromJSON(env.TEST_TIMEOUT) }}
         run: |
           ## Build a single OR filter expression covering all new tests
-          filter=$(awk 'NF { printf "%s%s", (NR>1 ? " | " : ""), "test(=" $0 ")" }' \
-                   /tmp/new-prop-tests.txt)
+          filter=$(sed 's/.*/test(=&)/' /tmp/new-prop-tests.txt | paste -sd ' | ')
 
           ## Write a temporary nextest config that enables JUnit output on the ci profile.
           ## --config-file points here so the repo source tree is not modified.
           cat > /tmp/nextest-ci.toml << 'EOF'
-          [profile.ci.junit]
-          path = "/tmp/nextest-junit.xml"
+          [profile.default]
+          junit = { path = "/tmp/nextest-junit.xml" }
           EOF
 
           set +e
@@ -334,8 +333,7 @@ jobs:
             --archive-file ~/test_archive.tar.zst \
             -E "$filter" \
             --fail-fast \
-            --config-file /tmp/nextest-ci.toml \
-            --profile ci
+            --config-file /tmp/nextest-ci.toml
           exit_code=$?
           set -e
 
