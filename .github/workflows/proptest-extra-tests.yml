@@ -284,12 +284,29 @@ jobs:
 
       ## Restore proptest regression files (if any) persisted from a previous run.
       ## Proptest reads these automatically to replay failing seeds.
+      ## Uses gh api to search by name across all runs (actions/download-artifact
+      ## only looks at the current run unless run-id is given explicitly).
       - name: Restore proptest regression (if any)
-        continue-on-error: true
-        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6.0.0
-        with:
-          name: proptest-regressions-pr-${{ github.event.pull_request.number || inputs.pr_number || github.run_id }}
-          path: .
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          artifact_name="proptest-regressions-pr-${{ github.event.pull_request.number || inputs.pr_number || github.run_id }}"
+
+          artifact_url=$(gh api \
+            "repos/${{ github.repository }}/actions/artifacts?name=${artifact_name}&per_page=1" \
+            --jq '.artifacts[0] | select(.expired == false) | .archive_download_url // empty')
+
+          if [[ -z "$artifact_url" ]]; then
+            echo "No regression artifact found — first run or expired"
+            exit 0
+          fi
+
+          echo "Restoring regression artifact: $artifact_name"
+          curl -fsSL \
+            -H "Authorization: Bearer ${{ github.token }}" \
+            "$artifact_url" \
+            -o /tmp/regression.zip
+          unzip -o /tmp/regression.zip -d .
 
       ## Run all new proptest tests in parallel with an elevated `PROPTEST_CASES` value.
       ## nextest runs tests concurrently by default (one thread per CPU core).
