@@ -26,13 +26,12 @@ on:
     inputs:
       base_ref:
         description: "BASE branch to diff against (default: develop)"
-        required: false
+        required: true
         default: "develop"
         type: string
       pr_number:
-        description: "PR number to allow stateful run (default: none)"
-        required: false
-        default: ""
+        description: "PR number for stateful run (artifact naming, PR comments)"
+        required: true
         type: string
 
 defaults:
@@ -41,7 +40,7 @@ defaults:
 
 ## Allow the job to be canceled when in progress due to new approval
 concurrency:
-  group: proptest-extra-${{ github.event.pull_request.number || inputs.pr_number || github.run_id }}
+  group: proptest-extra-${{ github.event.pull_request.number || inputs.pr_number }}
   cancel-in-progress: true
 
 env:
@@ -137,23 +136,24 @@ jobs:
       ## so we can skip full discovery when there are none.
       - name: Detect new proptest tests (git diff)
         id: detect
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref || inputs.base_ref }}
         run: |
-          base_ref="${{ github.event.pull_request.base.ref || inputs.base_ref }}"
-          git fetch --depth=1 origin "$base_ref"
+          git fetch --depth=1 origin "$BASE_REF"
 
           found=false
           ## For each .rs file that was added or modified in the PR...
           while IFS= read -r file; do
             ## ...check if any added line contains #[tag(..., prop, ...)]
             ## The tag list may have multiple comma-separated keywords with optional spaces.
-            if git diff "origin/$base_ref" -- "$file" \
+            if git diff "origin/$BASE_REF" -- "$file" \
                  | grep '^+[^+]' \
                  | grep -qP '#\[tag\([^)]*\bprop\b[^)]*\)\]'; then
               echo "Found new proptest tag in: $file"
               found=true
               break
             fi
-          done < <(git diff "origin/$base_ref" --name-only --diff-filter=AM -- '*.rs')
+          done < <(git diff "origin/$BASE_REF" --name-only --diff-filter=AM -- '*.rs')
 
           echo "found=$found" >> "$GITHUB_OUTPUT"
           if [ "$found" = "true" ]; then
@@ -165,6 +165,8 @@ jobs:
   proptests-run:
     ## NOTE: This job name is used as a required Status Check in branch
     ## protection rules. Renaming requires branch protection to be updated too.
+    ## When skipped via its `if:` condition, GitHub reports the status as
+    ## 'Success', so skipped runs are not blocking.
     name: Run New Proptest Tests
     needs: [check-approvals, check-changes]
     if: |
@@ -234,12 +236,13 @@ jobs:
       ## every fingerprint, forcing a full recompile regardless — no faster than
       ## using a fresh target directory (and it not worthy using same flag either).
       - name: List BASE branch tests
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref || inputs.base_ref }}
         run: |
-          base_ref="${{ github.event.pull_request.base.ref || inputs.base_ref }}"
-          echo "Base branch: $base_ref"
+          echo "Base branch: $BASE_REF"
 
-          git fetch --depth=1 origin "$base_ref"
-          git worktree add --detach /tmp/base-worktree "origin/$base_ref"
+          git fetch --depth=1 origin "$BASE_REF"
+          git worktree add --detach /tmp/base-worktree "origin/$BASE_REF"
 
           ## Capture HEAD workspace root before entering the worktree
           head_target="$(pwd)/target"
@@ -289,11 +292,10 @@ jobs:
       - name: Restore proptest regression (if any)
         env:
           GH_TOKEN: ${{ github.token }}
+          ARTIFACT_NAME: proptest-extra-pr-${{ github.event.pull_request.number || inputs.pr_number }}
         run: |
-          artifact_name="proptest-regressions-pr-${{ github.event.pull_request.number || inputs.pr_number || github.run_id }}"
-
           artifact_url=$(gh api \
-            "repos/${{ github.repository }}/actions/artifacts?name=${artifact_name}&per_page=1" \
+            "repos/${{ github.repository }}/actions/artifacts?name=${ARTIFACT_NAME}&per_page=1" \
             --jq '.artifacts[0] | select(.expired == false) | .archive_download_url // empty')
 
           if [[ -z "$artifact_url" ]]; then
@@ -301,7 +303,7 @@ jobs:
             exit 0
           fi
 
-          echo "Restoring regression artifact: $artifact_name"
+          echo "Restoring regression artifact: $ARTIFACT_NAME"
           curl -fsSL \
             -H "Authorization: Bearer $GH_TOKEN" \
             "$artifact_url" \
@@ -351,25 +353,24 @@ jobs:
       ## file format: <package>/proptest-regressions/<test-path>/<test-module>.txt
       - name: Save proptest regression (if any)
         if: failure() && steps.run_tests.outcome == 'failure'
+        env:
+          ARTIFACT_NAME: proptest-extra-pr-${{ github.event.pull_request.number || inputs.pr_number }}
         uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
         with:
-          name: proptest-regressions-pr-${{ github.event.pull_request.number || inputs.pr_number || github.run_id }}
+          name: ${{ env.ARTIFACT_NAME }}
           path: "**/proptest-regressions/"
           if-no-files-found: ignore
           overwrite: true
 
       ## On failure, post (or update by delete/create) a PR comment listing the failed tests,
       ## linking to the run and the artifact that holds the regression seeds.
-      ## Skipped when there is no PR context (workflow_dispatch without pr_number).
+      ## Skipped on failure due to test execution.
       - name: Report proptest failure on PR
-        if: >
-          failure() &&
-          steps.run_tests.outcome == 'failure' &&
-          (github.event.pull_request.number || inputs.pr_number)
+        if: failure() && steps.run_tests.outcome == 'failure'
         env:
           GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number || inputs.pr_number }}
         run: |
-          pr="${{ github.event.pull_request.number || inputs.pr_number }}"
           run_url="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
           failed_tests=$(cat /tmp/failed-prop-tests.txt 2>/dev/null || echo "(unknown)")
 
@@ -386,7 +387,7 @@ jobs:
           [View run and artifact]($run_url)"
 
           existing=$(gh api \
-            "repos/${{ github.repository }}/issues/$pr/comments" \
+            "repos/${{ github.repository }}/issues/$PR_NUMBER/comments" \
             --jq '[.[] | select(.body | startswith("<!-- proptest-regression-report -->"))][0].id // empty')
 
           if [[ -n "$existing" ]]; then
@@ -394,6 +395,6 @@ jobs:
             echo "Deleted previous comment $existing"
           fi
 
-          gh api "repos/${{ github.repository }}/issues/$pr/comments" \
+          gh api "repos/${{ github.repository }}/issues/$PR_NUMBER/comments" \
             -X POST --field body="$body"
           echo "Posted new comment"
