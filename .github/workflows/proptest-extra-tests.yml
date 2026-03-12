@@ -303,7 +303,7 @@ jobs:
 
           echo "Restoring regression artifact: $artifact_name"
           curl -fsSL \
-            -H "Authorization: Bearer ${{ github.token }}" \
+            -H "Authorization: Bearer $GH_TOKEN" \
             "$artifact_url" \
             -o /tmp/regression.zip
           unzip -o /tmp/regression.zip -d .
@@ -351,7 +351,7 @@ jobs:
       ## Persist proptest regression files (if any) for a potential next run.
       ## file format: <package>/proptest-regressions/<test-path>/<test-module>.txt
       - name: Save proptest regression (if any)
-        if: always()
+        if: failure() && steps.run_tests.outcome == 'failure'
         uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
         with:
           name: proptest-regressions-pr-${{ github.event.pull_request.number || inputs.pr_number || github.run_id }}
