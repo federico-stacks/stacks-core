@@ -321,24 +321,23 @@ jobs:
           ## Build a single OR filter expression covering all new tests
           filter=$(awk '{printf "%s%s", (NR==1?"":" | "), "test(=" $0 ")"}' /tmp/new-prop-tests.txt)
 
-          ## Write a temporary nextest config that enables JUnit output on the ci profile.
-          ## --config-file points here so the repo source tree is not modified.
-          cat > /tmp/nextest-ci.toml << 'EOF'
+          ## Write a temporary nextest config that enables JUnit output and sets the
+          ## filter expression for selecting tests to run
+          cat > /tmp/nextest-ci.toml << EOF
           [profile.default]
           junit = { path = "/tmp/nextest-junit.xml" }
+          default-filter = '$filter'
           EOF
 
           set +e
           cargo nextest run \
             --archive-file ~/test_archive.tar.zst \
-            -E "$filter" \
             --fail-fast \
             --config-file /tmp/nextest-ci.toml
           exit_code=$?
           set -e
 
           ## On failure, extract the failing test names from the JUnit report
-          ## using xmllint XPath so the PR comment step has a structured input.
           if [ $exit_code -ne 0 ] && [ -f /tmp/nextest-junit.xml ]; then
             sudo apt-get install -y libxml2-utils
             xmllint --xpath '//testcase[failure or error]/@name' /tmp/nextest-junit.xml \
@@ -359,12 +358,12 @@ jobs:
           if-no-files-found: ignore
           overwrite: true
 
-      ## On failure, post (or update) a PR comment listing the failed tests,
-      ## linking to the run, and naming the artifact that holds the regression seeds.
+      ## On failure, post (or update by delete/create) a PR comment listing the failed tests,
+      ## linking to the run and the artifact that holds the regression seeds.
       ## Skipped when there is no PR context (workflow_dispatch without pr_number).
       - name: Report proptest failure on PR
         if: >
-          always() &&
+          failure() &&
           steps.run_tests.outcome == 'failure' &&
           (github.event.pull_request.number || inputs.pr_number)
         env:
