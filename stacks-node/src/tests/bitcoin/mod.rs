@@ -46,7 +46,7 @@ mod proptest_examples {
             prop_assert_eq!(proptest_cases, "2500");
         }
 
-        #[tag(prop)]
+        //#[tag(prop)]
         #[test]
         fn failing_proptest(_seed in any::<u8>()) {
             let proptest_cases = std::env::var("PROPTEST_CASES").unwrap_or_default();
