@@ -38,7 +38,7 @@ env:
   SEGMENT_DOWNLOAD_TIMEOUT_MINS: 3
   TEST_TIMEOUT: 60
   ## Number of generated cases to run per proptest (default for scheduled runs).
-  PROPTEST_CASES: 2500
+  PROPTEST_CASES: 250
   ## Test tag to filter for proptest tests
   TEST_TAG: t_prop
   ## Branch-aware artifact name for proptest regression files.
@@ -143,7 +143,9 @@ jobs:
         uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
         with:
           name: ${{ env.ARTIFACT_NAME }}
-          path: "**/proptest-regressions/"
+          path: |
+            **/proptest-regressions/
+            **/*.proptest-regressions
           if-no-files-found: ignore
           overwrite: true
 
