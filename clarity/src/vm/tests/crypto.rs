@@ -792,6 +792,7 @@ proptest! {
         ).unwrap().unwrap();
 
         prop_assert_eq!(Value::Bool(false), result);
+        prop_assert!(false);
     }
 
     #[tag(t_prop)]
