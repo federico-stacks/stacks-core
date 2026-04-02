@@ -193,11 +193,9 @@ pub fn special_map(
         ))?;
     let function = lookup_function(function_name, exec_state, invoke_ctx)?;
 
-    // Let's consider a function f (f a b c ...)
-    // We will first re-arrange our sequences [a0, a1, ...] [b0, b1, ...] [c0, c1, ...] ...
-    // To get something like: [a0, b0, c0, ...] [a1, b1, c1, ...]
-    let mut mapped_func_args: Vec<Vec<Value>> = vec![];
-    let mut min_args_len = usize::MAX;
+    // Evaluate each sequence argument into an iterator and record its length.
+    let mut iterators = Vec::with_capacity(args.len() - 1);
+    let mut min_len = usize::MAX;
     for map_arg in args[1..].iter() {
         let sequence =
             eval(map_arg, exec_state, invoke_ctx, context)?.clone_with_cost(exec_state)?;
@@ -208,38 +206,28 @@ pub fn special_map(
             ))
             .into());
         };
-        let seq_len = seq.len();
-        min_args_len = min_args_len.min(seq_len);
-        for (apply_index, element_result) in seq.into_iter().enumerate() {
-            let value = element_result.map_err(|_| {
-                VmInternalError::Expect(
-                    "ERROR: Invalid sequence data successfully constructed".into(),
-                )
-            })?;
-            if apply_index > min_args_len {
-                break;
-            }
-            if apply_index >= mapped_func_args.len() {
-                mapped_func_args.push(vec![value]);
-            } else {
-                mapped_func_args[apply_index].push(value);
-            }
-        }
+        let iter = seq.into_iter();
+        min_len = min_len.min(iter.len());
+        iterators.push(iter);
     }
 
-    // We can now apply the map
-    let mut mapped_results = vec![];
-    let mut previous_len = None;
-    for arguments in mapped_func_args.into_iter() {
-        // Stop iterating when we are done with the shortest sequence
-        if let Some(previous_len) = previous_len {
-            if previous_len != arguments.len() {
-                break;
-            }
-        } else {
-            previous_len = Some(arguments.len());
+    // Apply the function element-wise, stopping at the shortest sequence.
+    let min_len = if iterators.is_empty() { 0 } else { min_len };
+    let mut mapped_results = Vec::with_capacity(min_len);
+    for _ in 0..min_len {
+        let mut call_args = Vec::with_capacity(iterators.len());
+        for iter in iterators.iter_mut() {
+            let value = iter
+                .next()
+                .expect("iterator shorter than reported len")
+                .map_err(|_| {
+                    VmInternalError::Expect(
+                        "ERROR: Invalid sequence data successfully constructed".into(),
+                    )
+                })?;
+            call_args.push(value);
         }
-        let res = apply_evaluated(&function, arguments, exec_state, invoke_ctx)?;
+        let res = apply_evaluated(&function, call_args, exec_state, invoke_ctx)?;
         mapped_results.push(res);
     }
 
