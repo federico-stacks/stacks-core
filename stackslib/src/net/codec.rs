@@ -1,5 +1,5 @@
 // Copyright (C) 2013-2020 Blockstack PBC, a public benefit corporation
-// Copyright (C) 2020-2023 Stacks Open Internet Foundation
+// Copyright (C) 2020-2026 Stacks Open Internet Foundation
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -1391,6 +1391,12 @@ impl StacksMessage {
             relayers: vec![],
             payload: message,
         }
+    }
+
+    /// Return the wire size of this message in bytes.
+    /// Uses preamble.payload_len which is set during deserialization from the wire.
+    pub fn wire_size(&self) -> u64 {
+        (PREAMBLE_ENCODED_SIZE as u64) + (self.preamble.payload_len as u64)
     }
 
     /// Create an unsigned Stacks message
