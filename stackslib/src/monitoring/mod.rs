@@ -339,6 +339,12 @@ pub fn update_outbound_rpc_bandwidth(value: i64) {
 }
 
 #[allow(unused_variables)]
+pub fn increment_node_unsolicited_messages(count: u64) {
+    #[cfg(feature = "monitoring_prom")]
+    prometheus::NODE_UNSOLICITED_MESSAGES.inc_by(i64::try_from(count).unwrap_or(i64::MAX));
+}
+
+#[allow(unused_variables)]
 pub fn observe_peer_buffered_bytes(kind: &str, bytes: u64) {
     #[cfg(feature = "monitoring_prom")]
     prometheus::PEER_BUFFERED_BYTES

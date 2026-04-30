@@ -299,6 +299,11 @@ lazy_static! {
         "Node-wide total buffered message count across all P2P conversations, sampled once per network cycle. Cross-check on the byte total.",
         &["kind"]
     ).unwrap();
+
+    pub static ref NODE_UNSOLICITED_MESSAGES: IntCounter = register_int_counter!(opts!(
+        "stacks_node_node_unsolicited_messages",
+        "Total number of unsolicited P2P messages received from peers, counted before authentication / classification / buffering. An unsolicited message is one whose request_id does not match any in-flight request issued by this node (see ConversationP2P::is_solicited)."
+    )).unwrap();
 }
 
 pub fn new_rpc_call_timer(path: &str) -> HistogramTimer {

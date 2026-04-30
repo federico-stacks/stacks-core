@@ -5124,6 +5124,12 @@ impl PeerNetwork {
             self.deregister_peer(peer);
         }
 
+        // count raw unsolicited messages before auth/classification/buffering decisions
+        let unsolicited_count: u64 = unsolicited_messages.values().map(|v| v.len() as u64).sum();
+        if unsolicited_count > 0 {
+            crate::monitoring::increment_node_unsolicited_messages(unsolicited_count);
+        }
+
         // filter out unsolicited messages and buffer up ones that might become processable
         let unhandled_messages = self.authenticate_unsolicited_messages(unsolicited_messages);
         let unhandled_messages = self.handle_unsolicited_sortition_messages(
