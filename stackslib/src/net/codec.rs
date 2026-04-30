@@ -1391,6 +1391,12 @@ impl StacksMessage {
         }
     }
 
+    /// Return the wire size of this message in bytes.
+    /// Uses preamble.payload_len which is set during deserialization from the wire.
+    pub fn wire_size(&self) -> u64 {
+        (PREAMBLE_ENCODED_SIZE as u64) + (self.preamble.payload_len as u64)
+    }
+
     /// Create an unsigned Stacks message
     pub fn from_chain_view(
         peer_version: u32,

@@ -17,8 +17,9 @@
 use lazy_static::lazy_static;
 use prometheus::{
     histogram_opts, labels, opts, register_gauge, register_histogram, register_histogram_vec,
-    register_int_counter, register_int_counter_vec, register_int_gauge, Gauge, Histogram,
-    HistogramTimer, HistogramVec, IntCounter, IntCounterVec, IntGauge,
+    register_int_counter, register_int_counter_vec, register_int_gauge, register_int_gauge_vec,
+    Gauge, Histogram, HistogramTimer, HistogramVec, IntCounter, IntCounterVec, IntGauge,
+    IntGaugeVec,
 };
 
 lazy_static! {
@@ -265,6 +266,38 @@ lazy_static! {
         "stacks_unreachable_errors_total",
         "Number of unreachable Clarity VM errors triggered (indicates potential bugs)",
         &["error_type"]
+    ).unwrap();
+
+    pub static ref PEER_BUFFERED_BYTES: HistogramVec = register_histogram_vec!(histogram_opts!(
+        "stacks_node_peer_buffered_bytes",
+        "Distribution of buffered unsolicited-message bytes per P2P conversation, sampled once per network cycle. The `kind` label selects how a single peer's contribution is computed: `sortition` = pending_messages only, `stacks` = pending_stacks_messages only, `combined` = sum of both maps for that peer.",
+        vec![1_024.0, 4_096.0, 16_384.0, 65_536.0, 262_144.0,
+             1_048_576.0, 4_194_304.0, 16_777_216.0, 67_108_864.0,
+             268_435_456.0, 1_073_741_824.0]
+    ), &["kind"]).unwrap();
+
+    pub static ref PEER_BUFFERED_MESSAGES: HistogramVec = register_histogram_vec!(histogram_opts!(
+        "stacks_node_peer_buffered_messages",
+        "Distribution of buffered unsolicited-message counts per P2P conversation, sampled once per network cycle. See `stacks_node_peer_buffered_bytes` for the meaning of the `kind` label.",
+        vec![1.0, 4.0, 16.0, 64.0, 256.0, 1_024.0, 4_096.0]
+    ), &["kind"]).unwrap();
+
+    pub static ref PEER_BUFFERED_BYTES_MAX: IntGaugeVec = register_int_gauge_vec!(
+        "stacks_node_peer_buffered_bytes_max",
+        "Largest single-peer buffered-bytes value observed during the most recent network cycle. Captures the absolute peak even when it falls into the top histogram bucket.",
+        &["kind"]
+    ).unwrap();
+
+    pub static ref NODE_BUFFERED_BYTES: IntGaugeVec = register_int_gauge_vec!(
+        "stacks_node_node_buffered_bytes",
+        "Node-wide total buffered bytes across all P2P conversations, sampled once per network cycle. `kind=\"combined\"` is the headline 'memory currently held in peer buffers' value.",
+        &["kind"]
+    ).unwrap();
+
+    pub static ref NODE_BUFFERED_MESSAGES: IntGaugeVec = register_int_gauge_vec!(
+        "stacks_node_node_buffered_messages",
+        "Node-wide total buffered message count across all P2P conversations, sampled once per network cycle. Cross-check on the byte total.",
+        &["kind"]
     ).unwrap();
 }
 

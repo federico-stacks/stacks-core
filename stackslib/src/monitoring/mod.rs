@@ -339,6 +339,46 @@ pub fn update_outbound_rpc_bandwidth(value: i64) {
 }
 
 #[allow(unused_variables)]
+pub fn observe_peer_buffered_bytes(kind: &str, bytes: u64) {
+    #[cfg(feature = "monitoring_prom")]
+    prometheus::PEER_BUFFERED_BYTES
+        .with_label_values(&[kind])
+        .observe(bytes as f64);
+}
+
+#[allow(unused_variables)]
+pub fn observe_peer_buffered_messages(kind: &str, count: usize) {
+    #[cfg(feature = "monitoring_prom")]
+    prometheus::PEER_BUFFERED_MESSAGES
+        .with_label_values(&[kind])
+        .observe(count as f64);
+}
+
+#[allow(unused_variables)]
+pub fn set_peer_buffered_bytes_max(kind: &str, bytes: i64) {
+    #[cfg(feature = "monitoring_prom")]
+    prometheus::PEER_BUFFERED_BYTES_MAX
+        .with_label_values(&[kind])
+        .set(bytes);
+}
+
+#[allow(unused_variables)]
+pub fn set_node_buffered_bytes(kind: &str, bytes: i64) {
+    #[cfg(feature = "monitoring_prom")]
+    prometheus::NODE_BUFFERED_BYTES
+        .with_label_values(&[kind])
+        .set(bytes);
+}
+
+#[allow(unused_variables)]
+pub fn set_node_buffered_messages(kind: &str, count: i64) {
+    #[cfg(feature = "monitoring_prom")]
+    prometheus::NODE_BUFFERED_MESSAGES
+        .with_label_values(&[kind])
+        .set(count);
+}
+
+#[allow(unused_variables)]
 pub fn increment_msg_counter(name: String) {
     #[cfg(feature = "monitoring_prom")]
     prometheus::MSG_COUNTER_VEC

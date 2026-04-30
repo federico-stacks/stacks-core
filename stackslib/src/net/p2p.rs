@@ -43,7 +43,11 @@ use crate::chainstate::stacks::boot::RewardSet;
 use crate::chainstate::stacks::db::{StacksBlockHeaderTypes, StacksChainState};
 use crate::chainstate::stacks::StacksBlockHeader;
 use crate::core::{EpochList, StacksEpoch};
-use crate::monitoring::{update_inbound_neighbors, update_outbound_neighbors};
+use crate::monitoring::{
+    observe_peer_buffered_bytes, observe_peer_buffered_messages, set_node_buffered_bytes,
+    set_node_buffered_messages, set_peer_buffered_bytes_max, update_inbound_neighbors,
+    update_outbound_neighbors,
+};
 use crate::net::atlas::{AtlasDB, AttachmentsDownloader};
 use crate::net::chat::{ConversationP2P, NeighborStats};
 use crate::net::connection::{ConnectionOptions, ReplyHandleP2P};
@@ -4981,6 +4985,97 @@ impl PeerNetwork {
         Ok(ret)
     }
 
+    /// Sample per-conversation buffered-message stats and feed them to the
+    /// monitoring layer. Walks `pending_messages` (sortition) and
+    /// `pending_stacks_messages` (stacks tip), then a third pass over the union
+    /// of their keys to produce a per-peer "combined" view.
+    ///
+    /// For each pass:
+    /// - the histogram receives one observation per peer (records the per-peer
+    ///   distribution),
+    /// - the `_max` gauge records the largest single-peer value this cycle,
+    /// - the `node_*` gauges record the across-peer sum (i.e. node-wide memory
+    ///   currently held in peer buffers).
+    ///
+    /// Cost: O(total_buffered_messages); `wire_size()` is O(1).
+    fn sample_peer_buffered_stats(&self) {
+        let mut sort_peer_max: u64 = 0;
+        let mut sort_node_total_bytes: u64 = 0;
+        let mut sort_node_total_count: u64 = 0;
+        for msgs in self.pending_messages.values() {
+            let bytes: u64 = msgs.iter().map(|m| m.wire_size()).sum();
+            observe_peer_buffered_bytes("sortition", bytes);
+            observe_peer_buffered_messages("sortition", msgs.len());
+            if bytes > sort_peer_max {
+                sort_peer_max = bytes;
+            }
+            sort_node_total_bytes = sort_node_total_bytes.saturating_add(bytes);
+            sort_node_total_count = sort_node_total_count.saturating_add(msgs.len() as u64);
+        }
+        set_peer_buffered_bytes_max("sortition", sort_peer_max as i64);
+        set_node_buffered_bytes("sortition", sort_node_total_bytes as i64);
+        set_node_buffered_messages("sortition", sort_node_total_count as i64);
+
+        let mut stacks_peer_max: u64 = 0;
+        let mut stacks_node_total_bytes: u64 = 0;
+        let mut stacks_node_total_count: u64 = 0;
+        for msgs in self.pending_stacks_messages.values() {
+            let bytes: u64 = msgs.iter().map(|m| m.wire_size()).sum();
+            observe_peer_buffered_bytes("stacks", bytes);
+            observe_peer_buffered_messages("stacks", msgs.len());
+            if bytes > stacks_peer_max {
+                stacks_peer_max = bytes;
+            }
+            stacks_node_total_bytes = stacks_node_total_bytes.saturating_add(bytes);
+            stacks_node_total_count = stacks_node_total_count.saturating_add(msgs.len() as u64);
+        }
+        set_peer_buffered_bytes_max("stacks", stacks_peer_max as i64);
+        set_node_buffered_bytes("stacks", stacks_node_total_bytes as i64);
+        set_node_buffered_messages("stacks", stacks_node_total_count as i64);
+
+        // Walk the union of keys so peers present in only one map are still counted.
+        let mut comb_per_peer_max: u64 = 0;
+        let mut comb_node_total_bytes: u64 = 0;
+        let mut comb_node_total_count: u64 = 0;
+        let mut keys: HashSet<&(usize, NeighborKey)> = HashSet::new();
+        keys.extend(self.pending_messages.keys());
+        keys.extend(self.pending_stacks_messages.keys());
+        for k in keys {
+            let s_bytes: u64 = self
+                .pending_messages
+                .get(k)
+                .map(|v| v.iter().map(|m| m.wire_size()).sum())
+                .unwrap_or(0);
+            let s_count = self.pending_messages.get(k).map(|v| v.len()).unwrap_or(0);
+            let p_bytes: u64 = self
+                .pending_stacks_messages
+                .get(k)
+                .map(|v| v.iter().map(|m| m.wire_size()).sum())
+                .unwrap_or(0);
+            let p_count = self
+                .pending_stacks_messages
+                .get(k)
+                .map(|v| v.len())
+                .unwrap_or(0);
+
+            let peer_combined_bytes = s_bytes.saturating_add(p_bytes);
+            let peer_combined_count = s_count + p_count;
+
+            observe_peer_buffered_bytes("combined", peer_combined_bytes);
+            observe_peer_buffered_messages("combined", peer_combined_count);
+
+            if peer_combined_bytes > comb_per_peer_max {
+                comb_per_peer_max = peer_combined_bytes;
+            }
+            comb_node_total_bytes = comb_node_total_bytes.saturating_add(peer_combined_bytes);
+            comb_node_total_count =
+                comb_node_total_count.saturating_add(peer_combined_count as u64);
+        }
+        set_peer_buffered_bytes_max("combined", comb_per_peer_max as i64);
+        set_node_buffered_bytes("combined", comb_node_total_bytes as i64);
+        set_node_buffered_messages("combined", comb_node_total_count as i64);
+    }
+
     /// Update p2p networking state.
     /// -- accept new connections
     /// -- send data on ready sockets
@@ -5151,6 +5246,8 @@ impl PeerNetwork {
         let inbound_neighbors = self.peers.len() - outbound_neighbors as usize;
         update_outbound_neighbors(outbound_neighbors as i64);
         update_inbound_neighbors(inbound_neighbors as i64);
+
+        self.sample_peer_buffered_stats();
 
         // fault injection -- periodically disconnect from everyone
         if cfg!(test) {
