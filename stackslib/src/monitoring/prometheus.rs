@@ -300,10 +300,11 @@ lazy_static! {
         &["kind"]
     ).unwrap();
 
-    pub static ref NODE_UNSOLICITED_MESSAGES: IntCounter = register_int_counter!(opts!(
-        "stacks_node_node_unsolicited_messages",
-        "Total number of unsolicited P2P messages received from peers, counted before authentication / classification / buffering. An unsolicited message is one whose request_id does not match any in-flight request issued by this node (see ConversationP2P::is_solicited)."
-    )).unwrap();
+    pub static ref NODE_UNSOLICITED_MESSAGES_TOTAL: IntCounterVec = register_int_counter_vec!(
+        "stacks_node_node_unsolicited_messages_total",
+        "Total number of unsolicited P2P messages received from peers, broken down by StacksMessageType name. Counted before authentication / classification / buffering. An unsolicited message is one whose request_id does not match any in-flight request issued by this node (see ConversationP2P::is_solicited).",
+        &["name"]
+    ).unwrap();
 }
 
 pub fn new_rpc_call_timer(path: &str) -> HistogramTimer {

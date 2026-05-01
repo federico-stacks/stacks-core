@@ -5124,10 +5124,17 @@ impl PeerNetwork {
             self.deregister_peer(peer);
         }
 
-        // count raw unsolicited messages before auth/classification/buffering decisions
-        let unsolicited_count: u64 = unsolicited_messages.values().map(|v| v.len() as u64).sum();
-        if unsolicited_count > 0 {
-            crate::monitoring::increment_node_unsolicited_messages(unsolicited_count);
+        // count raw unsolicited messages by type, before auth/classification/buffering decisions
+        let mut unsolicited_counts: HashMap<&'static str, u64> = HashMap::new();
+        for messages in unsolicited_messages.values() {
+            for msg in messages {
+                *unsolicited_counts
+                    .entry(msg.payload.get_message_name())
+                    .or_insert(0) += 1;
+            }
+        }
+        for (name, count) in unsolicited_counts {
+            crate::monitoring::increment_node_unsolicited_messages(name, count);
         }
 
         // filter out unsolicited messages and buffer up ones that might become processable
