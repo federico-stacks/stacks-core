@@ -30,11 +30,9 @@ use crate::chainstate::burn::operations::BlockstackOperationType;
 use crate::chainstate::nakamoto::coordinator::tests::make_token_transfer;
 use crate::chainstate::nakamoto::tests::get_account;
 use crate::chainstate::nakamoto::NakamotoBlockHeader;
-use crate::chainstate::stacks::test::{make_codec_test_block, make_codec_test_microblock};
 use crate::chainstate::stacks::tests::TestStacksNode;
 use crate::chainstate::stacks::*;
 use crate::chainstate::tests::TestChainstate;
-use crate::core::*;
 use crate::net::relay::{AcceptedNakamotoBlocks, ProcessedNetReceipts, Relayer};
 use crate::net::stackerdb::StackerDBs;
 use crate::net::test::*;
@@ -372,62 +370,6 @@ fn test_buffer_data_message() {
         txs: vec![],
     };
 
-    let blocks_available = StacksMessage::new(
-        1,
-        1,
-        1,
-        &BurnchainHeaderHash([0x01; 32]),
-        7,
-        &BurnchainHeaderHash([0x07; 32]),
-        StacksMessageType::BlocksAvailable(BlocksAvailableData {
-            available: vec![
-                (ConsensusHash([0x11; 20]), BurnchainHeaderHash([0x22; 32])),
-                (ConsensusHash([0x33; 20]), BurnchainHeaderHash([0x44; 32])),
-            ],
-        }),
-    );
-
-    let microblocks_available = StacksMessage::new(
-        1,
-        1,
-        1,
-        &BurnchainHeaderHash([0x01; 32]),
-        7,
-        &BurnchainHeaderHash([0x07; 32]),
-        StacksMessageType::MicroblocksAvailable(BlocksAvailableData {
-            available: vec![
-                (ConsensusHash([0x11; 20]), BurnchainHeaderHash([0x22; 32])),
-                (ConsensusHash([0x33; 20]), BurnchainHeaderHash([0x44; 32])),
-            ],
-        }),
-    );
-
-    let block = StacksMessage::new(
-        1,
-        1,
-        1,
-        &BurnchainHeaderHash([0x01; 32]),
-        7,
-        &BurnchainHeaderHash([0x07; 32]),
-        StacksMessageType::Blocks(BlocksData {
-            blocks: vec![BlocksDatum(
-                ConsensusHash([0x11; 20]),
-                make_codec_test_block(10, StacksEpochId::Epoch25),
-            )],
-        }),
-    );
-    let microblocks = StacksMessage::new(
-        1,
-        1,
-        1,
-        &BurnchainHeaderHash([0x01; 32]),
-        7,
-        &BurnchainHeaderHash([0x07; 32]),
-        StacksMessageType::Microblocks(MicroblocksData {
-            index_anchor_block: StacksBlockId([0x55; 32]),
-            microblocks: vec![make_codec_test_microblock(10)],
-        }),
-    );
     let nakamoto_block = StacksMessage::new(
         1,
         1,
@@ -460,48 +402,6 @@ fn test_buffer_data_message() {
             },
         }),
     );
-
-    for _ in 0..peer.network.connection_opts.max_buffered_blocks_available {
-        assert!(peer
-            .network
-            .buffer_sortition_data_message(0, &peer_nk, blocks_available.clone()));
-    }
-    assert!(!peer
-        .network
-        .buffer_sortition_data_message(0, &peer_nk, blocks_available));
-
-    for _ in 0..peer
-        .network
-        .connection_opts
-        .max_buffered_microblocks_available
-    {
-        assert!(peer.network.buffer_sortition_data_message(
-            0,
-            &peer_nk,
-            microblocks_available.clone()
-        ));
-    }
-    assert!(!peer
-        .network
-        .buffer_sortition_data_message(0, &peer_nk, microblocks_available));
-
-    for _ in 0..peer.network.connection_opts.max_buffered_blocks {
-        assert!(peer
-            .network
-            .buffer_sortition_data_message(0, &peer_nk, block.clone()));
-    }
-    assert!(!peer
-        .network
-        .buffer_sortition_data_message(0, &peer_nk, block));
-
-    for _ in 0..peer.network.connection_opts.max_buffered_microblocks {
-        assert!(peer
-            .network
-            .buffer_sortition_data_message(0, &peer_nk, microblocks.clone()));
-    }
-    assert!(!peer
-        .network
-        .buffer_sortition_data_message(0, &peer_nk, microblocks));
 
     for _ in 0..peer.network.connection_opts.max_buffered_nakamoto_blocks {
         assert!(peer

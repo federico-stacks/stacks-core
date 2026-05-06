@@ -86,63 +86,10 @@ impl PeerNetwork {
     ) -> bool {
         // check limits against connection opts, and if the limit is not met, then buffer up the
         // message.
-        let mut blocks_available = 0;
-        let mut microblocks_available = 0;
-        let mut blocks_data = 0;
-        let mut microblocks_data = 0;
         let mut nakamoto_blocks_data = 0;
         let mut stackerdb_chunks_data = 0;
         for stored_msg in msgs.iter() {
             match &stored_msg.payload {
-                StacksMessageType::BlocksAvailable(_) => {
-                    blocks_available += 1;
-                    if matches!(&msg.payload, StacksMessageType::BlocksAvailable(..))
-                        && blocks_available >= self.connection_opts.max_buffered_blocks_available
-                    {
-                        debug!(
-                            "{:?}: Cannot buffer BlocksAvailable from event {} -- already have {} buffered",
-                            &self.get_local_peer(), event_id, blocks_available
-                        );
-                        return false;
-                    }
-                }
-                StacksMessageType::MicroblocksAvailable(_) => {
-                    microblocks_available += 1;
-                    if matches!(&msg.payload, StacksMessageType::MicroblocksAvailable(..))
-                        && microblocks_available
-                            >= self.connection_opts.max_buffered_microblocks_available
-                    {
-                        debug!(
-                            "{:?}: Cannot buffer MicroblocksAvailable from event {} -- already have {} buffered",
-                            &self.get_local_peer(), event_id, microblocks_available
-                        );
-                        return false;
-                    }
-                }
-                StacksMessageType::Blocks(_) => {
-                    blocks_data += 1;
-                    if matches!(&msg.payload, StacksMessageType::Blocks(..))
-                        && blocks_data >= self.connection_opts.max_buffered_blocks
-                    {
-                        debug!(
-                            "{:?}: Cannot buffer BlocksData from event {} -- already have {} buffered",
-                            &self.get_local_peer(), event_id, blocks_data
-                        );
-                        return false;
-                    }
-                }
-                StacksMessageType::Microblocks(_) => {
-                    microblocks_data += 1;
-                    if matches!(&msg.payload, StacksMessageType::Microblocks(..))
-                        && microblocks_data >= self.connection_opts.max_buffered_microblocks
-                    {
-                        debug!(
-                            "{:?}: Cannot buffer MicroblocksData from event {} -- already have {} buffered",
-                            &self.get_local_peer(), event_id, microblocks_data
-                        );
-                        return false;
-                    }
-                }
                 StacksMessageType::NakamotoBlocks(_) => {
                     nakamoto_blocks_data += 1;
                     if matches!(&msg.payload, StacksMessageType::NakamotoBlocks(..))
