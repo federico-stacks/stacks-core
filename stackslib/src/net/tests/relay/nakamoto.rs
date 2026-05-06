@@ -912,7 +912,6 @@ fn test_buffer_nonready_nakamoto_blocks() {
                         &node.chainstate,
                         unsolicited_msgs,
                         true,
-                        true,
                     );
 
                     follower.chain.stacks_node = Some(node);

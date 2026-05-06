@@ -1017,7 +1017,6 @@ impl PeerNetwork {
         chainstate: &StacksChainState,
         event_id: usize,
         payload: &StacksMessageType,
-        ibd: bool,
         buffer: bool,
     ) -> (bool, bool) {
         match payload {
@@ -1173,7 +1172,6 @@ impl PeerNetwork {
         sortdb: &SortitionDB,
         chainstate: &StacksChainState,
         mut unsolicited: PendingMessages,
-        ibd: bool,
         buffer: bool,
     ) -> HashMap<(usize, NeighborKey), Vec<StacksMessage>> {
         unsolicited.retain(|(event_id, neighbor_key), messages| {
@@ -1204,7 +1202,6 @@ impl PeerNetwork {
                     chainstate,
                     *event_id,
                     &message.payload,
-                    ibd,
                     buffer,
                 );
                 if buffer && to_buffer {
