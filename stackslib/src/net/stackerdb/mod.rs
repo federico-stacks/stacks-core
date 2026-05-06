@@ -731,6 +731,33 @@ impl PeerNetwork {
                     // the future.
                     // We should buffer this in case it becomes storable, but don't
                     // store it yet.
+                    // Validate the chunk before buffering to prevent invalid data from being
+                    // accepted (e.g. chunks with forged signatures or out-of-bounds slot IDs).
+                    let stackerdb_config = if let Some(config) =
+                        self.get_stacker_db_configs().get(&chunk_data.contract_id)
+                    {
+                        config
+                    } else {
+                        return Ok((false, false));
+                    };
+
+                    let slot_versions =
+                        match self.stackerdbs.get_slot_versions(&chunk_data.contract_id) {
+                            Ok(versions) => versions,
+                            Err(_) => {
+                                return Ok((false, false));
+                            }
+                        };
+
+                    if !self.validate_received_chunk(
+                        &chunk_data.contract_id,
+                        stackerdb_config,
+                        &chunk_data.chunk_data,
+                        &slot_versions,
+                    )? {
+                        return Ok((false, false));
+                    }
+
                     return Ok((true, false));
                 } else {
                     return Ok((false, false));
