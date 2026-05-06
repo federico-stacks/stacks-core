@@ -1021,52 +1021,20 @@ impl PeerNetwork {
         buffer: bool,
     ) -> (bool, bool) {
         match payload {
-            // Update our inv state for this peer, but only do so if we have an
-            // outbound connection to it and it's authenticated (we don't synchronize inv
-            // state with inbound peers).  Since we will have received this message
-            // from an _inbound_ conversation, we need to find the reciprocal _outbound_
-            // conversation and use _that_ conversation's neighbor key to identify
-            // which inventory we need to update.
-            StacksMessageType::BlocksAvailable(ref new_blocks) => {
-                // no need to forward to relayer
-                let to_buffer = self.handle_unsolicited_BlocksAvailable(
-                    sortdb, chainstate, event_id, new_blocks, ibd, buffer,
+            // Explicitly match obsolete Stacks v2 messages.
+            // Although they could fall under `_` match, listing them here documents
+            // that they are intentionally dropped. Remove once support for
+            // these messages is removed from the codebase.
+            StacksMessageType::BlocksAvailable(_)
+            | StacksMessageType::MicroblocksAvailable(_)
+            | StacksMessageType::Blocks(_)
+            | StacksMessageType::Microblocks(_) => {
+                debug!(
+                    "{:?}: Drop obsolete pre-Nakamoto message: {}",
+                    self.get_local_peer(),
+                    payload.get_message_description()
                 );
-                (to_buffer, false)
-            }
-            StacksMessageType::MicroblocksAvailable(ref new_mblocks) => {
-                // no need to forward to relayer
-                let to_buffer = self.handle_unsolicited_MicroblocksAvailable(
-                    sortdb,
-                    chainstate,
-                    event_id,
-                    new_mblocks,
-                    ibd,
-                    buffer,
-                );
-                (to_buffer, false)
-            }
-            StacksMessageType::Blocks(ref new_blocks) => {
-                // update inv state for this peer, and always forward to the relayer
-                let to_buffer =
-                    self.handle_unsolicited_BlocksData(sortdb, event_id, new_blocks, buffer);
-
-                // forward to relayer for processing
-                (to_buffer, true)
-            }
-            StacksMessageType::Microblocks(ref new_mblocks) => {
-                // update inv state for this peer, and optionally forward to the relayer.
-                // Note that if these microblocks can be processed *now*, then they *will not* be
-                // buffered
-                let to_buffer = self.handle_unsolicited_MicroblocksData(
-                    chainstate,
-                    event_id,
-                    new_mblocks,
-                    buffer,
-                );
-
-                // only forward to the relayer if we don't need to buffer it.
-                (to_buffer, true)
+                (false, false)
             }
             StacksMessageType::NakamotoBlocks(ref new_blocks) => {
                 let to_buffer = if buffer {
