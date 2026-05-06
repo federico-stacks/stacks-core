@@ -1,5 +1,5 @@
 // Copyright (C) 2013-2020 Blockstack PBC, a public benefit corporation
-// Copyright (C) 2020-2026 Stacks Open Internet Foundation
+// Copyright (C) 2020-2023 Stacks Open Internet Foundation
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -180,9 +180,7 @@ impl PeerNetwork {
         let mut microblocks_data = 0;
         let mut nakamoto_blocks_data = 0;
         let mut stackerdb_chunks_data = 0;
-        let mut existing_bytes: u64 = 0;
         for stored_msg in msgs.iter() {
-            existing_bytes = existing_bytes.saturating_add(stored_msg.wire_size());
             match &stored_msg.payload {
                 StacksMessageType::BlocksAvailable(_) => {
                     blocks_available += 1;
@@ -260,22 +258,6 @@ impl PeerNetwork {
                 }
                 _ => {}
             }
-        }
-
-        // check per-connection byte budget
-        let new_msg_bytes = msg.wire_size();
-        if existing_bytes.saturating_add(new_msg_bytes)
-            > self.connection_opts.max_buffered_bytes_per_connection
-        {
-            debug!(
-                "{:?}: Cannot buffer message from event {} -- per-connection byte budget exceeded ({} + {} > {})",
-                &self.get_local_peer(),
-                event_id,
-                existing_bytes,
-                new_msg_bytes,
-                self.connection_opts.max_buffered_bytes_per_connection
-            );
-            return false;
         }
 
         true

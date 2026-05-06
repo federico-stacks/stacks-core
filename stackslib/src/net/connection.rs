@@ -1,5 +1,5 @@
 // Copyright (C) 2013-2020 Blockstack PBC, a public benefit corporation
-// Copyright (C) 2020-2026 Stacks Open Internet Foundation
+// Copyright (C) 2020-2023 Stacks Open Internet Foundation
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -410,8 +410,6 @@ pub struct ConnectionOptions {
     pub max_buffered_nakamoto_blocks: u64,
     /// maximum number of pushed StackerDB chunk messages we can buffer before processing
     pub max_buffered_stackerdb_chunks: u64,
-    /// maximum total bytes of buffered unsolicited messages per connection
-    pub max_buffered_bytes_per_connection: u64,
     /// how often to query a remote peer for its mempool, in seconds
     pub mempool_sync_interval: u64,
     /// how many transactions to ask for in a mempool query
@@ -566,7 +564,6 @@ impl std::default::Default for ConnectionOptions {
             max_buffered_microblocks: 1024,
             max_buffered_nakamoto_blocks: 1024,
             max_buffered_stackerdb_chunks: 4096,
-            max_buffered_bytes_per_connection: 20 * 1024 * 1024, // 20 MB per connection
             mempool_sync_interval: 30, // number of seconds in-between mempool sync
             mempool_max_tx_query: 128, // maximum number of transactions to visit per mempool query
             mempool_sync_timeout: 180, // how long a mempool sync can go for (3 minutes)

@@ -1,4 +1,4 @@
-// Copyright (C) 2024-2026 Stacks Open Internet Foundation
+// Copyright (C) 2024 Stacks Open Internet Foundation
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -15,7 +15,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::mpsc::{sync_channel, Receiver, SyncSender, TryRecvError};
-use std::{thread, u64};
+use std::thread;
 
 use clarity::vm::types::QualifiedContractIdentifier;
 use rand::{thread_rng, Rng};
@@ -343,9 +343,9 @@ impl SeedNode {
     }
 }
 
-/// Test buffering count limits
+/// Test buffering limits
 #[test]
-fn test_buffer_data_message_per_count_limit() {
+fn test_buffer_data_message() {
     let observer = TestEventObserver::new();
     let bitvecs = vec![vec![
         true, true, true, true, true, true, true, true, true, true,
@@ -353,11 +353,6 @@ fn test_buffer_data_message_per_count_limit() {
 
     let (mut peer, _followers) =
         make_nakamoto_peers_from_invs(function_name!(), &observer, 10, 5, bitvecs, 1);
-
-    // Set byte budget to very high value so this test only exercises count-based limits
-    peer.network
-        .connection_opts
-        .max_buffered_bytes_per_connection = u64::MAX;
 
     let peer_nk = peer.to_neighbor().addr;
     let nakamoto_block = NakamotoBlock {
@@ -525,148 +520,6 @@ fn test_buffer_data_message_per_count_limit() {
     assert!(!peer
         .network
         .buffer_stacks_data_message(0, &peer_nk, stackerdb_chunk));
-}
-
-/// create a new message with stubbed data for a specific type
-fn make_msg(msg_type: StacksMessageType) -> StacksMessage {
-    use stacks_common::codec::{StacksMessageCodec, PREAMBLE_ENCODED_SIZE};
-
-    let mut msg = StacksMessage::new(
-        1,
-        1,
-        1,
-        &BurnchainHeaderHash([0x01; 32]),
-        7,
-        &BurnchainHeaderHash([0x07; 32]),
-        msg_type,
-    );
-    msg.preamble.payload_len = msg.serialize_to_vec().len() as u32 - PREAMBLE_ENCODED_SIZE;
-    msg
-}
-
-fn make_nakamoto_msg() -> StacksMessage {
-    let nakamoto_block = NakamotoBlock {
-        header: NakamotoBlockHeader {
-            version: 1,
-            chain_length: 457,
-            burn_spent: 126,
-            consensus_hash: ConsensusHash([0x55; 20]),
-            parent_block_id: StacksBlockId([0x03; 32]),
-            tx_merkle_root: Sha512Trunc256Sum([0x05; 32]),
-            state_index_root: TrieHash([0x07; 32]),
-            timestamp: 8,
-            miner_signature: MessageSignature::empty(),
-            signer_signature: vec![],
-            pox_treatment: BitVec::zeros(1).unwrap(),
-        },
-        txs: vec![],
-    };
-    make_msg(StacksMessageType::NakamotoBlocks(NakamotoBlocksData {
-        blocks: vec![nakamoto_block],
-    }))
-}
-
-fn make_stackerdb_msg() -> StacksMessage {
-    make_msg(StacksMessageType::StackerDBPushChunk(
-        StackerDBPushChunkData {
-            contract_id: QualifiedContractIdentifier::parse(
-                "ST000000000000000000002AMW42H.signers-1-4",
-            )
-            .unwrap(),
-            rc_consensus_hash: ConsensusHash([0x01; 20]),
-            chunk_data: StackerDBChunkData {
-                slot_id: 0,
-                slot_version: 1,
-                sig: MessageSignature::empty(),
-                data: vec![0xAB; 1000],
-            },
-        },
-    ))
-}
-
-/// Verify that the per-connection byte budget rejects messages once the budget is exceeded,
-/// even if the count-based limits have not been reached.
-#[test]
-fn test_buffer_data_message_per_connection_byte_budget() {
-    let observer = TestEventObserver::new();
-    let bitvecs = vec![vec![
-        true, true, true, true, true, true, true, true, true, true,
-    ]];
-
-    let (mut peer, _followers) =
-        make_nakamoto_peers_from_invs(function_name!(), &observer, 10, 5, bitvecs, 1);
-
-    let peer_nk = peer.to_neighbor().addr;
-
-    // Set count limits very high so they don't interfere
-    peer.network.connection_opts.max_buffered_nakamoto_blocks = u64::MAX;
-    peer.network.connection_opts.max_buffered_stackerdb_chunks = u64::MAX;
-
-    let naka_msg = make_nakamoto_msg();
-
-    // Set byte budget to allow exactly 2 messages
-    peer.network
-        .connection_opts
-        .max_buffered_bytes_per_connection = naka_msg.wire_size() * 2;
-
-    // Clear any prior buffered messages
-    peer.network.pending_messages.remove(&(0, peer_nk.clone()));
-
-    // First two should succeed
-    assert!(
-        peer.network
-            .buffer_sortition_data_message(0, &peer_nk, naka_msg.clone()),
-        "first naka message should be accepted"
-    );
-    assert!(
-        peer.network
-            .buffer_sortition_data_message(0, &peer_nk, naka_msg.clone()),
-        "second naka message should be accepted"
-    );
-
-    // Third should fail (byte budget exceeded)
-    assert!(
-        !peer
-            .network
-            .buffer_sortition_data_message(0, &peer_nk, naka_msg.clone()),
-        "third naka message should be rejected by byte budget"
-    );
-
-    // Also test with mixed msg types buffer_stacks_data_message with StackerDB chunks
-    let stackerdb_msg = make_stackerdb_msg();
-
-    // Set byte budget to allow exactly 1 naka msg and 1 stacker DB msg
-    peer.network
-        .connection_opts
-        .max_buffered_bytes_per_connection = naka_msg.wire_size() + stackerdb_msg.wire_size();
-
-    // Clear prior stacks messages
-    peer.network
-        .pending_stacks_messages
-        .remove(&(0, peer_nk.clone()));
-
-    assert!(
-        peer.network
-            .buffer_stacks_data_message(0, &peer_nk, naka_msg.clone()),
-        "first naka message should be accepted"
-    );
-    assert!(
-        peer.network
-            .buffer_stacks_data_message(0, &peer_nk, stackerdb_msg.clone()),
-        "second stacks message should be accepted"
-    );
-    assert!(
-        !peer
-            .network
-            .buffer_stacks_data_message(0, &peer_nk, naka_msg),
-        "third naka message should be rejected by byte budget"
-    );
-    assert!(
-        !peer
-            .network
-            .buffer_stacks_data_message(0, &peer_nk, stackerdb_msg),
-        "forth stacks message should be rejected by byte budget"
-    );
 }
 
 /// Verify that Nakmaoto blocks whose sortitions are known will *not* be buffered, but instead
