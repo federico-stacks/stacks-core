@@ -3707,6 +3707,27 @@ pub struct ConnectionOptionsFile {
     /// @default: [`DEFAULT_BLOCK_PROPOSAL_VALIDATION_TIMEOUT_SECS`]
     /// @units: seconds
     pub block_proposal_validation_timeout_secs: Option<u64>,
+
+    /// Maximum bytes/sec a single peer may push as transactions before being NACKed
+    /// with Throttled. Zero disables the cap.
+    /// ---
+    /// @default: `0` (disabled)
+    /// @units: bytes/second
+    pub max_transaction_push_bandwidth: Option<u64>,
+
+    /// Maximum bytes/sec a single peer may push as StackerDB chunks before being
+    /// NACKed with Throttled. Zero disables the cap.
+    /// ---
+    /// @default: `0` (disabled)
+    /// @units: bytes/second
+    pub max_stackerdb_push_bandwidth: Option<u64>,
+
+    /// Maximum bytes/sec a single peer may push as Nakamoto blocks before being
+    /// NACKed with Throttled. Zero disables the cap.
+    /// ---
+    /// @default: `0` (disabled)
+    /// @units: bytes/second
+    pub max_nakamoto_block_push_bandwidth: Option<u64>,
 }
 
 impl ConnectionOptionsFile {
@@ -3864,6 +3885,15 @@ impl ConnectionOptionsFile {
             block_proposal_validation_timeout_secs: self
                 .block_proposal_validation_timeout_secs
                 .unwrap_or(DEFAULT_BLOCK_PROPOSAL_VALIDATION_TIMEOUT_SECS),
+            max_transaction_push_bandwidth: self
+                .max_transaction_push_bandwidth
+                .unwrap_or(default.max_transaction_push_bandwidth),
+            max_stackerdb_push_bandwidth: self
+                .max_stackerdb_push_bandwidth
+                .unwrap_or(default.max_stackerdb_push_bandwidth),
+            max_nakamoto_block_push_bandwidth: self
+                .max_nakamoto_block_push_bandwidth
+                .unwrap_or(default.max_nakamoto_block_push_bandwidth),
             ..default
         })
     }
@@ -5055,6 +5085,34 @@ mod tests {
         assert_eq!(
             false, cfg_opts.force_db_migrate,
             "internal default migrate setting"
+        );
+    }
+
+    #[test]
+    fn test_load_push_bandwidth_fields_config() {
+        // check defaults for omitted fields
+        let config = utils::config_from_valid_string("");
+        assert_eq!(0, config.connection_options.max_transaction_push_bandwidth,);
+        assert_eq!(0, config.connection_options.max_stackerdb_push_bandwidth,);
+        assert_eq!(
+            0,
+            config.connection_options.max_nakamoto_block_push_bandwidth,
+        );
+
+        // Check values for configured fields
+        let config = utils::config_from_valid_string(
+            r#"
+            [connection_options]
+            max_transaction_push_bandwidth = 10
+            max_stackerdb_push_bandwidth = 20
+            max_nakamoto_block_push_bandwidth = 30
+            "#,
+        );
+        assert_eq!(10, config.connection_options.max_transaction_push_bandwidth,);
+        assert_eq!(20, config.connection_options.max_stackerdb_push_bandwidth,);
+        assert_eq!(
+            30,
+            config.connection_options.max_nakamoto_block_push_bandwidth,
         );
     }
 }
