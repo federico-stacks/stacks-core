@@ -385,10 +385,15 @@ pub struct ConnectionOptions {
     pub max_attachment_retry_count: u64,
     pub read_only_call_limit: ExecutionCost,
     pub maximum_call_argument_size: u32,
+    /// maximum bytes/sec a single peer may push as Stacks 2.x Blocks before being NACKed
     pub max_block_push_bandwidth: u64,
+    /// maximum bytes/sec a single peer may push as Stacks 2.x Microblocks before being NACKed
     pub max_microblocks_push_bandwidth: u64,
+    /// maximum bytes/sec a single peer may push as Transaction messages before being NACKed
     pub max_transaction_push_bandwidth: u64,
+    /// maximum bytes/sec a single peer may push as StackerDB chunks before being NACKed
     pub max_stackerdb_push_bandwidth: u64,
+    /// maximum bytes/sec a single peer may push as Nakamoto Block messages before being NACKed
     pub max_nakamoto_block_push_bandwidth: u64,
     pub max_sockets: usize,
     pub public_ip_address: Option<(PeerAddress, u16)>,
