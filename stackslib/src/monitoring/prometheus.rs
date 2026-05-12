@@ -302,8 +302,20 @@ lazy_static! {
 
     pub static ref NODE_UNSOLICITED_MESSAGES_TOTAL: IntCounterVec = register_int_counter_vec!(
         "stacks_node_node_unsolicited_messages_total",
-        "Total number of unsolicited P2P messages received from peers, broken down by StacksMessageType name. Counted before authentication / classification / buffering. An unsolicited message is one whose request_id does not match any in-flight request issued by this node (see ConversationP2P::is_solicited).",
-        &["name"]
+        "Total number of unsolicited P2P messages received from peers, broken down by StacksMessageType name and source. Counted before authentication / classification / buffering. An unsolicited message is one whose request_id does not match any in-flight request issued by this node (see ConversationP2P::is_solicited). `source` classifies StackerDBPushChunk by boot-contract name (`signer` for `signers-*`, `miner` for `miners`); `other` for everything else.",
+        &["name", "source"]
+    ).unwrap();
+
+    pub static ref NODE_STACKS_BUFFERED_BYTES_BY_SOURCE: IntGaugeVec = register_int_gauge_vec!(
+        "stacks_node_node_stacks_buffered_bytes_by_source",
+        "Node-wide buffered StackerDBPushChunk bytes in pending_stacks_messages, broken down by source (`signer` / `miner` / `other`). Sampled once per network cycle. Sum across sources equals stacks_node_node_buffered_bytes{kind=\"stacks\"}.",
+        &["source"]
+    ).unwrap();
+
+    pub static ref NODE_STACKS_BUFFERED_MESSAGES_BY_SOURCE: IntGaugeVec = register_int_gauge_vec!(
+        "stacks_node_node_stacks_buffered_messages_by_source",
+        "Node-wide buffered StackerDBPushChunk message count in pending_stacks_messages, broken down by source (`signer` / `miner` / `other`). Sampled once per network cycle. Sum across sources equals stacks_node_node_buffered_messages{kind=\"stacks\"}.",
+        &["source"]
     ).unwrap();
 }
 

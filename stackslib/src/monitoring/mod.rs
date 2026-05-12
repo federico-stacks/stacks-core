@@ -339,11 +339,27 @@ pub fn update_outbound_rpc_bandwidth(value: i64) {
 }
 
 #[allow(unused_variables)]
-pub fn increment_node_unsolicited_messages(name: &str, count: u64) {
+pub fn increment_node_unsolicited_messages(name: &str, source: &str, count: u64) {
     #[cfg(feature = "monitoring_prom")]
     prometheus::NODE_UNSOLICITED_MESSAGES_TOTAL
-        .with_label_values(&[name])
+        .with_label_values(&[name, source])
         .inc_by(i64::try_from(count).unwrap_or(i64::MAX));
+}
+
+#[allow(unused_variables)]
+pub fn set_node_stacks_buffered_bytes_by_source(source: &str, bytes: i64) {
+    #[cfg(feature = "monitoring_prom")]
+    prometheus::NODE_STACKS_BUFFERED_BYTES_BY_SOURCE
+        .with_label_values(&[source])
+        .set(bytes);
+}
+
+#[allow(unused_variables)]
+pub fn set_node_stacks_buffered_messages_by_source(source: &str, count: i64) {
+    #[cfg(feature = "monitoring_prom")]
+    prometheus::NODE_STACKS_BUFFERED_MESSAGES_BY_SOURCE
+        .with_label_values(&[source])
+        .set(count);
 }
 
 #[allow(unused_variables)]
