@@ -317,6 +317,13 @@ lazy_static! {
         "Node-wide buffered StackerDBPushChunk message count in pending_stacks_messages, broken down by source (`signer` / `miner` / `other`). Sampled once per network cycle. Sum across sources equals stacks_node_node_buffered_messages{kind=\"stacks\"}.",
         &["source"]
     ).unwrap();
+
+    pub static ref STACKERDB_RECEIVED_MESSAGE_BYTES: HistogramVec = register_histogram_vec!(histogram_opts!(
+        "stacks_node_stackerdb_received_message_bytes",
+        "Distribution of received StackerDBPushChunk message sizes (wire bytes, including preamble), classified by sender source (`signer` for `signers-*` boot contracts, `miner` for the `miners` boot contract, `other` otherwise). One observation per received chunk, recorded before authentication / buffering.",
+        vec![256.0, 1_024.0, 4_096.0, 16_384.0, 65_536.0, 262_144.0,
+             1_048_576.0, 2_097_152.0, 4_194_304.0, 8_388_608.0, 16_777_216.0]
+    ), &["source"]).unwrap();
 }
 
 pub fn new_rpc_call_timer(path: &str) -> HistogramTimer {

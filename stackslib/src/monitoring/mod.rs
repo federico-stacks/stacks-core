@@ -363,6 +363,14 @@ pub fn set_node_stacks_buffered_messages_by_source(source: &str, count: i64) {
 }
 
 #[allow(unused_variables)]
+pub fn observe_stackerdb_received_message_bytes(source: &str, bytes: u64) {
+    #[cfg(feature = "monitoring_prom")]
+    prometheus::STACKERDB_RECEIVED_MESSAGE_BYTES
+        .with_label_values(&[source])
+        .observe(bytes as f64);
+}
+
+#[allow(unused_variables)]
 pub fn observe_peer_buffered_bytes(kind: &str, bytes: u64) {
     #[cfg(feature = "monitoring_prom")]
     prometheus::PEER_BUFFERED_BYTES
