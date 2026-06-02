@@ -897,15 +897,16 @@ fn special_contract_of(
 
     let contract_identifier = match context.lookup_callable_contract(contract_ref) {
         Some(trait_data) => {
-            exec_state
+            if !exec_state
                 .global_context
                 .database
-                .get_contract(&trait_data.contract_identifier)
-                .map_err(|_e| {
-                    RuntimeCheckErrorKind::NoSuchContract(
-                        trait_data.contract_identifier.to_string(),
-                    )
-                })?;
+                .has_contract(&trait_data.contract_identifier)
+            {
+                return Err(RuntimeCheckErrorKind::NoSuchContract(
+                    trait_data.contract_identifier.to_string(),
+                )
+                .into());
+            }
 
             &trait_data.contract_identifier
         }
@@ -923,6 +924,7 @@ fn special_contract_of(
 
 #[cfg(test)]
 mod test {
+    use clarity_types::ClarityName;
     use stacks_common::consts::CHAIN_ID_TESTNET;
     use stacks_common::types::StacksEpochId;
 
@@ -1005,7 +1007,7 @@ mod test {
         );
 
         // --- Atom argument, but NOT registered as a callable trait ---
-        let atom = SymbolicExpression::atom("not_a_trait".into());
+        let atom = SymbolicExpression::atom(ClarityName::from_literal("not_a_trait"));
 
         let contract_context =
             ContractContext::new(QualifiedContractIdentifier::transient(), version);
@@ -1250,7 +1252,8 @@ mod test {
         );
 
         // Pass an Atom but NOT a valid stacks block info property
-        let bad_property = SymbolicExpression::atom("not-a-valid-stacks-prop".into());
+        let bad_property =
+            SymbolicExpression::atom(ClarityName::from_literal("not-a-valid-stacks-prop"));
 
         let height = SymbolicExpression::atom_value(Value::UInt(0));
 
@@ -1301,7 +1304,8 @@ mod test {
         );
 
         // Atom But NOT a valid burn block info property
-        let bad_property = SymbolicExpression::atom("not-a-valid-burn-prop".into());
+        let bad_property =
+            SymbolicExpression::atom(ClarityName::from_literal("not-a-valid-burn-prop"));
 
         // Valid uint height to avoid TypeValueError
         let height = SymbolicExpression::atom_value(Value::UInt(0));
@@ -1368,8 +1372,8 @@ mod test {
         };
         // (contract-call? unknown-contract foo)
         let args = vec![
-            SymbolicExpression::atom("unknown-contract".into()), // Atom, NOT registered
-            SymbolicExpression::atom("foo".into()),              // Valid function name atom
+            SymbolicExpression::atom(ClarityName::from_literal("unknown-contract")), // Atom, NOT registered
+            SymbolicExpression::atom(ClarityName::from_literal("foo")), // Valid function name atom
         ];
 
         let err = special_contract_call(&args, &mut exec_state, &invoke_ctx, &context).unwrap_err();
