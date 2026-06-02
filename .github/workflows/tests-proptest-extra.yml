@@ -296,29 +296,29 @@ jobs:
           | sort > /tmp/head-tests.txt
           echo "HEAD tests: $(wc -l < /tmp/head-tests.txt)"
 
-      # Check out the base branch into a temporary git worktree and compile
-      # it to list its tests.
+      # Install mold + clang so the from-scratch BASE compile links faster
+      # (the same linker setup-test-caches uses to build the archive).
+      - name: Install mold Linker (and clang)
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mold clang
+
+      # Check out the base branch into a temporary git worktree and compile it
+      # to list its tests, building in the worktree's own target/. The worktree
+      # (and its build output) is removed afterwards.
       #
-      # CARGO_TARGET_DIR is pointed at the HEAD workspace's target/ directory.
-      # Anything unchanged between HEAD and BASE (external deps and
-      # unmodified stacks-core crates) is reused, so only the crates
-      # that actually differ need recompiling.
-      #
-      # NOTE:
-      # Overwriting HEAD binaries in target/ is harmless — the test-run step
-      # uses --archive-file, which extracts HEAD binaries into a temp dir and
-      # never reads from target/.
-      #
-      # Reusing HEAD's target/ is only effective when testenv fell back to a local
-      # build (cache miss): that build uses no special RUSTFLAGS, so the artifacts
-      # are compatible and Rust only recompiles the crates that differ from BASE.
-      # When testenv succeeds (cache hit), target/ contains artifacts built with
-      # -Cinstrument-coverage (from manage-test-caches). The flag mismatch invalidates
-      # every fingerprint, forcing a full recompile regardless — no faster than
-      # using a fresh target directory (and it's not worth using same flag either).
+      # This is always a full compile: the ./target/debug/ restored by "Restore
+      # Test Archive Cache" was built with -C instrument-coverage by
+      # setup-test-caches, so its fingerprints never match this list-only build
+      # and there is nothing to reuse. We don't try — we just speed the compile
+      # up with the mold/clang linker (via RUSTFLAGS) and allow warnings (the
+      # job-wide `-D warnings` would otherwise turn a benign warning into a hard
+      # error and leave an empty list).
       - name: List BASE branch tests
         env:
           BASE_REF: ${{ github.event.pull_request.base.ref || inputs.base_ref }}
+          RUSTFLAGS: "-C linker=clang -C link-arg=-fuse-ld=mold -A warnings"
         shell: bash
         run: |
           echo "Base branch: $BASE_REF"
@@ -326,16 +326,14 @@ jobs:
           git fetch --depth=1 origin "$BASE_REF"
           git worktree add --detach /tmp/base-worktree "origin/$BASE_REF"
 
-          # Capture HEAD workspace root before entering the worktree
-          head_target="$(pwd)/target"
-
+          # Build in the worktree's own target/ (no HEAD target/ reuse — see note).
           pushd /tmp/base-worktree
-          CARGO_TARGET_DIR="$head_target" \
           cargo nextest list -Tjson > /tmp/base-list.json
           popd
 
-          # Worktree source files are clean (build output went to HEAD_TARGET)
-          git worktree remove /tmp/base-worktree
+          # Remove the worktree along with its build output (--force because the
+          # compile above populated its target/).
+          git worktree remove --force /tmp/base-worktree
           git worktree prune
           
           jq -r '
