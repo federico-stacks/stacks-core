@@ -1901,6 +1901,10 @@ const TOKEN_DEFINITIONS: &str = r#"
 (define-non-fungible-token stackaroo uint)
 "#;
 
+#[tag(t_prop)]
+#[test]
+fn hello_prop() {}
+
 proptest! {
     #[tag(t_prop)]
     #[test]
