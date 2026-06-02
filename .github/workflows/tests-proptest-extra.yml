@@ -296,29 +296,25 @@ jobs:
           | sort > /tmp/head-tests.txt
           echo "HEAD tests: $(wc -l < /tmp/head-tests.txt)"
 
-      # Check out the base branch into a temporary git worktree and compile
-      # it to list its tests.
+      # Check out the base branch into a temporary git worktree and compile it
+      # to list its tests. Build output is redirected to the HEAD workspace's
+      # target/ via CARGO_TARGET_DIR so the worktree source stays clean (the
+      # test-run step reads from --archive-file, never from target/, so
+      # overwriting HEAD binaries there is harmless).
       #
-      # CARGO_TARGET_DIR is pointed at the HEAD workspace's target/ directory.
-      # Anything unchanged between HEAD and BASE (external deps and
-      # unmodified stacks-core crates) is reused, so only the crates
-      # that actually differ need recompiling.
-      #
-      # NOTE:
-      # Overwriting HEAD binaries in target/ is harmless — the test-run step
-      # uses --archive-file, which extracts HEAD binaries into a temp dir and
-      # never reads from target/.
-      #
-      # Reusing HEAD's target/ is only effective when testenv fell back to a local
-      # build (cache miss): that build uses no special RUSTFLAGS, so the artifacts
-      # are compatible and Rust only recompiles the crates that differ from BASE.
-      # When testenv succeeds (cache hit), target/ contains artifacts built with
-      # -Cinstrument-coverage (from manage-test-caches). The flag mismatch invalidates
-      # every fingerprint, forcing a full recompile regardless — no faster than
-      # using a fresh target directory (and it's not worth using same flag either).
+      # Two safeguards, after a run where BASE listed 0 tests and the diff then
+      # treated every t_prop test in the repo as "new":
+      #   1. RUSTFLAGS is forced to `-Awarnings` for this list-only build. The
+      #      job-wide `-D warnings` otherwise turns any warning in BASE into a
+      #      hard error, leaving an empty list. (The HEAD archive is likewise
+      #      built with `-Awarnings`.)
+      #   2. stderr is kept on the log, the cargo exit code is checked, and the
+      #      step fails if the list is empty — so a broken BASE listing can never
+      #      silently fall through to "run every proptest".
       - name: List BASE branch tests
         env:
           BASE_REF: ${{ github.event.pull_request.base.ref || inputs.base_ref }}
+          # RUSTFLAGS: "-Awarnings"
         run: |
           echo "Base branch: $BASE_REF"
 
@@ -328,24 +324,39 @@ jobs:
           # Capture HEAD workspace root before entering the worktree
           head_target="$(pwd)/target"
 
-          pushd /tmp/base-worktree
-          CARGO_TARGET_DIR="$head_target" \
-          cargo nextest list \
-            -Tjson 2>/dev/null \
-          | jq -r '
+          # Capture stdout (the JSON listing) to a file so the cargo exit code —
+          # not jq/sort — governs success. Leave stderr on the log for diagnosis
+          # (no 2>/dev/null).
+          set +e
+          ( cd /tmp/base-worktree && \
+            CARGO_TARGET_DIR="$head_target" cargo nextest list -Tjson ) > /tmp/base-list.json
+          list_rc=$?
+          set -e
+
+          # Worktree source files are clean (build output went to HEAD_TARGET)
+          git worktree remove --force /tmp/base-worktree
+          git worktree prune
+
+          if [ "$list_rc" -ne 0 ]; then
+            echo "::error::BASE 'cargo nextest list' failed (exit $list_rc) — see build output above."
+            exit 1
+          fi
+
+          jq -r '
               .["rust-suites"]
               | to_entries[]
               | .value.testcases
               | keys[]
-            ' \
+            ' /tmp/base-list.json \
           | sort > /tmp/base-tests.txt
-          popd
 
-          # Worktree source files are clean (build output went to HEAD_TARGET)
-          git worktree remove /tmp/base-worktree
-          git worktree prune
+          base_count=$(wc -l < /tmp/base-tests.txt)
+          echo "Base tests: $base_count"
 
-          echo "Base tests: $(wc -l < /tmp/base-tests.txt)"
+          if [ "$base_count" -eq 0 ]; then
+            echo "::error::BASE test listing is empty — aborting to avoid treating all HEAD tests as new."
+            exit 1
+          fi
 
       # Compare the HEAD and base test lists and keep only tests that are new in HEAD.
       # Then filter to only those tagged with :t::...:t_prop:, i.e. test names of the form:
