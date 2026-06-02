@@ -5136,6 +5136,46 @@ fn trieptr_compressed_roundtrip_non_backptr() {
 }
 
 #[test]
+fn trieptr_compressed_roundtrip_inline_back_block_payload_u32() {
+    let mut ptr = TriePtr::new(TrieNodeID::Node16 as u8, 0x21, 777);
+    ptr.back_block = 42;
+
+    let mut bytes = vec![];
+    ptr.write_bytes_compressed(&mut bytes).unwrap();
+
+    assert_eq!(10, bytes.len());
+    assert_eq!(
+        set_compressed(set_inline_back_block(TrieNodeID::Node16 as u8)),
+        bytes[0]
+    );
+    assert_eq!(ptr, TriePtr::from_bytes_compressed(&bytes));
+    assert_eq!(
+        ptr,
+        TriePtr::read_bytes_compressed(&mut Cursor::new(&bytes)).unwrap()
+    );
+}
+
+#[test]
+fn trieptr_compressed_roundtrip_inline_back_block_payload_u64() {
+    let mut ptr = TriePtr::new(TrieNodeID::Node16 as u8, 0x22, u64::from(u32::MAX) + 9);
+    ptr.back_block = 314;
+
+    let mut bytes = vec![];
+    ptr.write_bytes_compressed(&mut bytes).unwrap();
+
+    assert_eq!(14, bytes.len());
+    assert_eq!(
+        set_compressed(set_inline_back_block(set_u64_ptr(TrieNodeID::Node16 as u8))),
+        bytes[0]
+    );
+    assert_eq!(ptr, TriePtr::from_bytes_compressed(&bytes));
+    assert_eq!(
+        ptr,
+        TriePtr::read_bytes_compressed(&mut Cursor::new(&bytes)).unwrap()
+    );
+}
+
+#[test]
 fn trieptr_compressed_roundtrip_backptr() {
     let ptr = TriePtr::new_backptr(
         TrieNodeID::Node48 as u8,
@@ -5157,6 +5197,54 @@ fn trieptr_compressed_roundtrip_backptr() {
         ptr,
         TriePtr::read_bytes_compressed(&mut Cursor::new(&bytes)).unwrap()
     );
+}
+
+#[test]
+fn trieptr_compressed_roundtrip_inline_back_block() {
+    // Non-backptr pointer with a non-zero `back_block`: the compressed wire
+    // format sets the inline-annotation bit (0x10) on the encoded id and
+    // appends a 4-byte back_block payload. The annotation bit is cleared on
+    // read, but the back_block value must round-trip.
+    let cases: [(u64, u32); 6] = [
+        (0u64, 1u32),
+        (0u64, u32::MAX),
+        (u64::from(u32::MAX), 0xdead_beef),
+        (u64::from(u32::MAX) + 1, 1u32),
+        (u64::from(u32::MAX) + 1, 0x01020304),
+        ((1u64 << 56) - 3, u32::MAX),
+    ];
+
+    for (ptr_value, back_block) in cases {
+        let ptr = TriePtr {
+            id: TrieNodeID::Node16 as u8,
+            chr: 0x55,
+            ptr: ptr_value,
+            back_block,
+        };
+
+        let mut bytes = vec![];
+        ptr.write_bytes_compressed(&mut bytes).unwrap();
+
+        let raw_encoded_id = if ptr_value > u64::from(u32::MAX) {
+            set_u64_ptr(TrieNodeID::Node16 as u8)
+        } else {
+            TrieNodeID::Node16 as u8
+        };
+        let expected_first_byte = set_inline_back_block(set_compressed(raw_encoded_id));
+        assert_eq!(expected_first_byte, bytes[0]);
+        assert_eq!(
+            TriePtr::compressed_size_for_id(expected_first_byte),
+            bytes.len()
+        );
+        assert_eq!(bytes.len(), ptr.compressed_size());
+
+        let decoded = TriePtr::from_bytes_compressed(&bytes);
+        assert_eq!(ptr, decoded);
+        assert_eq!(
+            ptr,
+            TriePtr::read_bytes_compressed(&mut Cursor::new(&bytes)).unwrap()
+        );
+    }
 }
 
 #[test]
@@ -5248,4 +5336,50 @@ fn ptrs_from_bytes_compressed_dense_mixed_width() {
     );
     assert_eq!(expected, decoded);
     assert_eq!(expected_consumed, cursor_pos);
+}
+
+#[test]
+fn test_node_copy_update_ptrs_preserves_nonzero_back_block() {
+    use crate::chainstate::stacks::index::node::node_copy_update_ptrs;
+
+    // Inline pointer with back_block = 0 (normal archival case) - should be overwritten
+    let mut ptrs = [TriePtr::new(TrieNodeID::Node4 as u8, 0x10, 100)];
+    assert_eq!(ptrs[0].back_block, 0);
+    node_copy_update_ptrs(&mut ptrs, 42);
+    assert!(is_backptr(ptrs[0].id()));
+    assert_eq!(ptrs[0].back_block, 42);
+    assert_eq!(ptrs[0].chr(), 0x10);
+    assert_eq!(ptrs[0].ptr(), 100);
+
+    // Inline pointer with back_block != 0 (squash annotation) - should be preserved
+    let mut ptrs = [TriePtr {
+        id: TrieNodeID::Node4 as u8,
+        chr: 0x20,
+        ptr: 200,
+        back_block: 99,
+    }];
+    node_copy_update_ptrs(&mut ptrs, 42);
+    assert!(is_backptr(ptrs[0].id()));
+    assert_eq!(
+        ptrs[0].back_block, 99,
+        "squash annotation must be preserved"
+    );
+    assert_eq!(ptrs[0].chr(), 0x20);
+    assert_eq!(ptrs[0].ptr(), 200);
+
+    // Empty pointer - should be untouched
+    let mut ptrs = [TriePtr::default()];
+    node_copy_update_ptrs(&mut ptrs, 42);
+    assert_eq!(ptrs[0], TriePtr::default());
+
+    // Already a backptr - should be skipped entirely
+    let orig = TriePtr {
+        id: set_backptr(TrieNodeID::Node16 as u8),
+        chr: 0x30,
+        ptr: 300,
+        back_block: 7,
+    };
+    let mut ptrs = [orig];
+    node_copy_update_ptrs(&mut ptrs, 42);
+    assert_eq!(ptrs[0], orig, "existing backptr must not be touched");
 }
