@@ -77,7 +77,12 @@ jobs:
         id: count
         env:
           GH_TOKEN: ${{ github.token }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref || github.ref_name }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
         run: |
+          # Debug: log the HEAD ref/sha this run is operating on
+          echo "Head branch: $HEAD_REF (sha: $HEAD_SHA)"
+
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             echo "workflow_dispatch — skipping approval count check"
             echo "ready=true" >> "$GITHUB_OUTPUT"
