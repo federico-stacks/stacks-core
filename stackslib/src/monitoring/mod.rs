@@ -362,12 +362,36 @@ pub fn set_node_stacks_buffered_messages_by_source(source: &str, count: i64) {
         .set(count);
 }
 
+/// Map a received-message wire size (bytes) to a human-readable, sort-stable
+/// `range` label. The numeric prefix (`00_`..`11_`) makes the labels sort by
+/// size in the Prometheus table view. Boundaries are upper-inclusive.
+#[cfg(feature = "monitoring_prom")]
+fn stackerdb_size_range_label(bytes: u64) -> &'static str {
+    match bytes {
+        0..=256 => "00_0-256B",
+        257..=1_024 => "01_256B-1KiB",
+        1_025..=4_096 => "02_1-4KiB",
+        4_097..=16_384 => "03_4-16KiB",
+        16_385..=65_536 => "04_16-64KiB",
+        65_537..=262_144 => "05_64-256KiB",
+        262_145..=1_048_576 => "06_256KiB-1MiB",
+        1_048_577..=2_097_152 => "07_1-2MiB",
+        2_097_153..=4_194_304 => "08_2-4MiB",
+        4_194_305..=8_388_608 => "09_4-8MiB",
+        8_388_609..=16_777_216 => "10_8-16MiB",
+        _ => "11_16MiB+",
+    }
+}
+
+/// Count a received StackerDB chunk, bucketed by its wire size into a `range`
+/// label and classified by `source`. The size→range mapping is done here, so
+/// callers only need to pass the raw byte size.
 #[allow(unused_variables)]
-pub fn observe_stackerdb_received_message_bytes(source: &str, bytes: u64) {
+pub fn increment_stackerdb_received_message_size(source: &str, bytes: u64) {
     #[cfg(feature = "monitoring_prom")]
-    prometheus::STACKERDB_RECEIVED_MESSAGE_BYTES
-        .with_label_values(&[source])
-        .observe(bytes as f64);
+    prometheus::STACKERDB_RECEIVED_MESSAGE_SIZE_BY_RANGE
+        .with_label_values(&[source, stackerdb_size_range_label(bytes)])
+        .inc();
 }
 
 #[allow(unused_variables)]

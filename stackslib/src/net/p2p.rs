@@ -45,8 +45,8 @@ use crate::chainstate::stacks::boot::{MINERS_NAME, SIGNERS_NAME};
 use crate::chainstate::stacks::StacksBlockHeader;
 use crate::core::{EpochList, StacksEpoch};
 use crate::monitoring::{
-    observe_peer_buffered_bytes, observe_peer_buffered_messages,
-    observe_stackerdb_received_message_bytes, set_node_buffered_bytes, set_node_buffered_messages,
+    increment_stackerdb_received_message_size, observe_peer_buffered_bytes,
+    observe_peer_buffered_messages, set_node_buffered_bytes, set_node_buffered_messages,
     set_node_stacks_buffered_bytes_by_source, set_node_stacks_buffered_messages_by_source,
     set_peer_buffered_bytes_max, update_inbound_neighbors, update_outbound_neighbors,
 };
@@ -5179,9 +5179,10 @@ impl PeerNetwork {
                 let name = msg.payload.get_message_name();
                 let source = Self::classify_message_source(&msg.payload);
                 *unsolicited_counts.entry((name, source)).or_insert(0) += 1;
-                // record the wire size of received StackerDB chunks, classified by sender
+                // record the wire size of received StackerDB chunks, bucketed by
+                // size range and classified by sender
                 if matches!(msg.payload, StacksMessageType::StackerDBPushChunk(..)) {
-                    observe_stackerdb_received_message_bytes(source, msg.wire_size());
+                    increment_stackerdb_received_message_size(source, msg.wire_size());
                 }
             }
         }
