@@ -33,3 +33,19 @@ inherits = "ci"
 # The number of tests to run simultaneously
 # Options: A positive integer (e.g., 4), "num-cpus", or a negative integer (e.g., -1)
 test-threads = "num-cpus"
+
+# Profile for the nightly flakiness hunt (`tests-flaky-nightly.yml`).
+#
+# The nightly exists to *measure* flakiness, so it deliberately diverges from
+# the `ci` profile. Do not "fix" these settings to match `ci`.
+[profile.ci-nightly]
+inherits = "ci"
+# A single attempt per test IS the datapoint. With retries a test that fails and
+# then passes reports green, which hides exactly the fail-then-pass flakes this
+# run exists to find: at a 30% per-attempt failure rate, a test survives three
+# attempts ~97% of the time and looks healthy on all but a handful of nights.
+retries = 0
+# One failing test must never suppress results for the rest of its partition.
+fail-fast = false
+# Nightly runs one test per job, same as `ci-sequential`.
+test-threads = 1

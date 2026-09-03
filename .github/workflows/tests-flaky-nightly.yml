@@ -1,0 +1,168 @@
+# Nightly flakiness hunt over the Bitcoin integration tests.
+#
+# Step 1: run the existing Bitcoin test workflow on a schedule with retries
+# disabled, and keep the JUnit reports. Nothing is reported anywhere yet.
+#
+# Why retries are disabled:
+#   PR CI runs the `ci` nextest profile with `retries = 2`, so a test that fails
+#   and then passes reports green. Those fail-then-pass flakes are the majority
+#   of what this workflow exists to find - at a 30% per-attempt failure rate a
+#   test survives three attempts ~97% of the time. The `ci-nightly` profile sets
+#   `retries = 0` so a single attempt per test is the datapoint.
+#
+# Why nightly, and not on pull requests:
+#   A failure here cannot be blamed on a pull request's changes, which removes
+#   the main confound when attributing a failure to the test itself.
+#
+# The test set, partitioning and exclusions are exactly those PR CI uses: this
+# workflow only swaps the nextest profile.
+
+name: "Tests: Flaky Nightly"
+run-name: "Tests: Flaky Nightly [${{ github.ref_name }}]"
+
+on:
+  schedule:
+    # 0200 UTC daily. Deliberately clear of the 0500 UTC nightlies, since this
+    # run occupies ~300 jobs.
+    - cron: "0 2 * * *"
+  workflow_dispatch:
+    inputs:
+      only-tests:
+        description: "Fully qualified test name(s), comma-separated. Empty runs the full set."
+        required: false
+        default: ""
+        type: string
+      nextest-profile:
+        description: "Nextest profile to run with"
+        required: false
+        default: "ci-nightly"
+        type: string
+
+# Set default permissions for all jobs
+permissions:
+  contents: read
+
+# Set default shell
+defaults:
+  run:
+    shell: bash
+
+# Configure concurrency
+concurrency:
+  group: flaky-nightly-${{ github.ref }}
+  cancel-in-progress: true
+
+# Env vars
+env:
+  TEST_ARCHIVE_FILE: "./test_archive.tar.zst"
+  DEBUG_BINARY_PATH: "./target/debug/"
+  # nextest profile with retries disabled (see .github/nextest/ci-nextest.toml).
+  #
+  # Do NOT name this NEXTEST_PROFILE: that variable is read by cargo-nextest
+  # itself, and workflow-level env reaches every job. The archive build runs
+  # `cargo nextest archive` without --config-file, so it would try to resolve
+  # this profile against the built-in set and fail with
+  # "profile `ci-nightly` not found (known profiles: default, default-miri)"
+  # after having already spent several minutes compiling.
+  NIGHTLY_NEXTEST_PROFILE: "ci-nightly"
+
+jobs:
+  ############################################################################
+  ### Global Variables Setup
+  ###
+  ### Bridges global env variables to the jobs context so they are safely
+  ### accessible by the reusable test workflow.
+  ############################################################################
+  setup-env:
+    name: "Setup: Global Variables"
+    runs-on: ubuntu-latest
+    outputs:
+      test-archive-file: ${{ steps.set-env.outputs.test_archive_file }}
+      debug-binary-path: ${{ steps.set-env.outputs.debug_binary_path }}
+      nextest-profile: ${{ steps.set-env.outputs.nextest_profile }}
+    steps:
+      - name: Export Env Variables
+        id: set-env
+        run: |
+          # Capture the archive file input, then expand the leading ~ to $HOME
+          INPUT_FILE="${{ env.TEST_ARCHIVE_FILE }}"
+          ARCHIVE_FILE="${INPUT_FILE/#\~/$HOME}"
+
+          # Scheduled runs have no inputs, so fall back to the env default
+          PROFILE="${{ inputs.nextest-profile }}"
+          PROFILE="${PROFILE:-${{ env.NIGHTLY_NEXTEST_PROFILE }}}"
+
+          echo "test_archive_file=$ARCHIVE_FILE" >> $GITHUB_OUTPUT
+          echo "debug_binary_path=${{ env.DEBUG_BINARY_PATH }}" >> $GITHUB_OUTPUT
+          echo "nextest_profile=$PROFILE" >> $GITHUB_OUTPUT
+
+          echo "### Flaky Nightly setup" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Setting | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "| --- | --- |" >> $GITHUB_STEP_SUMMARY
+          echo "| nextest profile | \`$PROFILE\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| ref | \`${{ github.ref_name }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| trigger | \`${{ github.event_name }}\` |" >> $GITHUB_STEP_SUMMARY
+
+  ############################################################################
+  ### Check Reusable Test Caches
+  ###
+  ### Both the archive build and the test jobs restore caches with
+  ### `fail-on-cache-miss: true`, so a missing cache otherwise surfaces as an
+  ### opaque restore failure partway through the run. This job checks both up
+  ### front and fails with a summary table naming the missing cache and a link
+  ### to create-test-caches.yml.
+  ###
+  ### Caches are only ever created by create-test-caches.yml (push to `main`, or
+  ### manual dispatch) - no other workflow, including this one, saves them.
+  ############################################################################
+  check-test-caches:
+    name: "Check: Test Caches"
+    uses: ./.github/workflows/_check-test-caches.yml
+
+  ############################################################################
+  ### Create Nextest Archive Artifact for Tests
+  ############################################################################
+  create-nextest-archive:
+    name: "Create: Nextest Archive Artifact"
+    needs:
+      - check-test-caches
+      - setup-env
+    runs-on: ubuntu-latest
+    steps:
+      # Checkout the code
+      #   - only .github is required for this job
+      - name: Checkout the latest code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          sparse-checkout: |
+            .github
+
+      # Create Nextest archive artifact
+      - name: Create Nextest Archive Artifact
+        uses: ./.github/actions/artifacts/nextest-archive
+        with:
+          action: create
+          archive-file: ${{ needs.setup-env.outputs.test-archive-file }}
+          debug-binary-path: ${{ needs.setup-env.outputs.debug-binary-path }}
+
+  ############################################################################
+  ### Run Bitcoin Tests
+  ###
+  ### Same test set, exclusions and partitioning as PR CI. Only the nextest
+  ### profile differs. Code coverage is skipped: this run measures flakiness,
+  ### and PR CI already produces the coverage report.
+  ############################################################################
+  tests-bitcoin:
+    name: "Tests: Bitcoin"
+    needs:
+      - create-nextest-archive
+      - setup-env
+    uses: ./.github/workflows/_tests-bitcoin.yml
+    with:
+      archive-file: ${{ needs.setup-env.outputs.test-archive-file }}
+      debug-binary-path: ${{ needs.setup-env.outputs.debug-binary-path }}
+      nextest-profile: ${{ needs.setup-env.outputs.nextest-profile }}
+      only-tests: ${{ inputs.only-tests }}
+      upload-junit-xml: "true"
+      upload-code-coverage: "false"

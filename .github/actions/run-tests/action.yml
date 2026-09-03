@@ -27,6 +27,13 @@ inputs:
   codecov-test-name:
     description: "Code coverage test name"
     required: true
+  nextest-profile:
+    description: |
+      Nextest profile override. Empty (the default) keeps the profile each run
+      mode has always used: `ci-sequential` for named tests, `ci-parallel` for
+      partitioned runs. The nightly flakiness hunt passes `ci-nightly`.
+    required: false
+    default: ""
   upload-junit-xml:
     description: "Whether or not to upload the nextest JUnit XML artifact"
     required: true
@@ -160,10 +167,14 @@ runs:
         FILTERSET=$(echo "${{ inputs.test-names }}" | sed -E 's/[[:space:]]*,[[:space:]]*/)|test(=/g')
         FILTERSET="test(=${FILTERSET})"
 
+        # Profile override, defaulting to the profile this mode has always used
+        PROFILE="${{ inputs.nextest-profile }}"
+        PROFILE="${PROFILE:-ci-sequential}"
+
         # nextest settings are configured in ~/.github/nextest/ci-nextest.toml, arguments here override those settings
         cargo nextest run \
           --config-file ./.github/nextest/ci-nextest.toml \
-          --profile ci-sequential \
+          --profile "$PROFILE" \
           --run-ignored all \
           --archive-file ${{ inputs.archive-file }} \
           -E "$FILTERSET"
@@ -178,10 +189,14 @@ runs:
       run: |
         export LLVM_PROFILE_FILE="test-results-%p-%m.profraw"
         
+        # Profile override, defaulting to the profile this mode has always used
+        PROFILE="${{ inputs.nextest-profile }}"
+        PROFILE="${PROFILE:-ci-parallel}"
+
         # nextest settings are configured in ~/.github/nextest/ci-nextest.toml, arguments here override those settings
         cargo nextest run \
           --config-file ./.github/nextest/ci-nextest.toml \
-          --profile ci-parallel \
+          --profile "$PROFILE" \
           --partition count:${{ inputs.partition }}/${{ inputs.total-partitions }} \
           --archive-file ${{ inputs.archive-file }}
           
