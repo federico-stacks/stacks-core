@@ -21,16 +21,26 @@ name: "Tests: Flaky Nightly"
 run-name: "Tests: Flaky Nightly [${{ github.ref_name }}]"
 
 on:
-  schedule:
+  # schedule:
     # 0200 UTC daily. Deliberately clear of the 0500 UTC nightlies, since this
     # run occupies ~300 jobs.
-    - cron: "0 2 * * *"
+  #  - cron: "0 2 * * *"
   workflow_dispatch:
     inputs:
       only-tests:
         description: "Fully qualified test name(s), comma-separated. Empty runs the full set."
         required: false
         default: ""
+        type: string
+      dry-run:
+        description: "Print issue mutations instead of performing them"
+        required: false
+        default: false
+        type: boolean
+      max-new-issues:
+        description: "Cap on issues created in a single run"
+        required: false
+        default: "10"
         type: string
       nextest-profile:
         description: "Nextest profile to run with"
@@ -185,9 +195,16 @@ jobs:
     needs:
       - tests-bitcoin
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # issues: file and comment on the per-test issues
+      issues: write
     env:
       JUNIT_DIR: "nextest_files"
       FAILED_TESTS_FILE: "failed-tests.jsonl"
+      FLAKY_LABEL: "flaky"
+      MAX_NEW_ISSUES: ${{ inputs.max-new-issues || '10' }}
+      DRY_RUN: ${{ inputs.dry-run == true }}
     steps:
       # Checkout the code
       #   - only .github is required for this job
@@ -219,3 +236,12 @@ jobs:
       - name: Report Failed Tests
         run: |
           bash ./.github/scripts/flaky_report.sh
+
+      # File or comment on one issue per failing test
+      #   - runs after the report, reading the JSONL it produced from the
+      #     working directory, so no artifact is needed to pass data along
+      - name: File Flaky Test Issues
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          bash ./.github/scripts/flaky_issues.sh
