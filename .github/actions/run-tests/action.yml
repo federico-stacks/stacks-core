@@ -178,9 +178,6 @@ runs:
           --run-ignored all \
           --archive-file ${{ inputs.archive-file }} \
           -E "$FILTERSET"
-          
-        # rename the resulting junit file from the toml config
-        mv junit.xml junit_${{ steps.generate-sanitized-file-name.outputs.file-name }}.xml
 
     # Mode 2: Run Partitioned Tests (If partition IS specified)
     - name: Run Partitioned Tests
@@ -199,10 +196,25 @@ runs:
           --profile "$PROFILE" \
           --partition count:${{ inputs.partition }}/${{ inputs.total-partitions }} \
           --archive-file ${{ inputs.archive-file }}
-          
-        # rename the resulting junit file from the toml config
-        mv junit.xml junit_${{ steps.generate-sanitized-file-name.outputs.file-name }}.xml
-          
+
+    # Rename the JUnit report away from the fixed path set in the nextest
+    # config, so each test job's report gets a distinct artifact name.
+    #
+    # if: always() matters. The rename used to be the last line of the run
+    # step above, but composite run steps use `bash -e`, so a failing test
+    # aborted the step before renaming - which meant JUnit reports were only
+    # ever uploaded for test jobs that PASSED, and no consumer could see a
+    # failure. nextest writes the report whether tests pass or fail.
+    - name: Rename JUnit Report
+      if: always()
+      shell: bash
+      run: |
+        if [ -f junit.xml ]; then
+          mv junit.xml junit_${{ steps.generate-sanitized-file-name.outputs.file-name }}.xml
+        else
+          echo "::warning title=No JUnit report::nextest wrote no junit.xml; the test binary may have failed to start"
+        fi
+
     ############################################################################
     ### Upload the nextest JUnit XML
     ############################################################################

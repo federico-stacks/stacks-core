@@ -49,6 +49,7 @@ mod epoch_21;
 mod epoch_22;
 mod epoch_23;
 mod epoch_24;
+mod flaky_tests;
 mod integrations;
 mod marf;
 mod mem_abort;

@@ -166,3 +166,56 @@ jobs:
       only-tests: ${{ inputs.only-tests }}
       upload-junit-xml: "true"
       upload-code-coverage: "false"
+
+  ############################################################################
+  ### Report Failed Tests
+  ###
+  ### Runs in the same workflow run as the tests, so it reads the JUnit reports
+  ### minutes after they are written - the artifacts' 1 day retention does not
+  ### matter here and no external store is needed.
+  ###
+  ### Answers only "which tests failed?". Classifying failures and filing
+  ### issues are separate steps.
+  ############################################################################
+  report:
+    name: "Report: Failed Tests"
+    # always(): the test jobs are expected to fail when a flaky test trips, and
+    # that failure is exactly what needs reporting.
+    if: always() && !cancelled()
+    needs:
+      - tests-bitcoin
+    runs-on: ubuntu-latest
+    env:
+      JUNIT_DIR: "nextest_files"
+      FAILED_TESTS_FILE: "failed-tests.jsonl"
+    steps:
+      # Checkout the code
+      #   - only .github is required for this job
+      - name: Checkout the latest code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          sparse-checkout: |
+            .github
+
+      # Download the nextest JUnit reports produced by the test jobs
+      #   - continue-on-error: a run that produced no reports failed before the
+      #     tests ran. The report step says so in the summary rather than the
+      #     job dying on a missing artifact.
+      - name: Download nextest JUnit artifacts
+        continue-on-error: true
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
+        with:
+          pattern: nextest-*
+          path: ${{ env.JUNIT_DIR }}
+          merge-multiple: true
+
+      # xmllint is not preinstalled on ubuntu-latest
+      - name: Install libxml2-utils
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libxml2-utils
+
+      # Parse the reports into a job summary plus files for later steps
+      - name: Report Failed Tests
+        run: |
+          bash ./.github/scripts/flaky_report.sh
