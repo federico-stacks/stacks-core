@@ -78,7 +78,191 @@ if [[ -z "${GH_TOKEN:-}" ]]; then
     exit 1
 fi
 
+## ── Main ────────────────────────────────────────────────────────────────────
+main() {
+    local failed_count existing_labels existing_issues
+    local record name duration excerpt marker comment_file body_file
+    local match number state url
+    local created=0 updated=0 reopened=0
+    local -a deferred=()
+
+    ## Preflight: issues must be enabled
+    # Forks have Issues disabled by default, and every gh issue call then fails
+    # with "repository has disabled issues". Check once, with the fix inline,
+    # rather than letting the first API call fail opaquely.
+    if [[ "$(gh api "repos/${repo}" --jq '.has_issues')" != "true" ]]; then
+        error "Issues are disabled on $(hl "${repo}"), so no issue can be filed!"
+        return 1
+    fi
+
+    ## Nothing to do?
+    if [[ ! -s "${failed_tests_file}" ]]; then
+        info "No failures in $(hl "${failed_tests_file}") - nothing to file"
+        summary "## Flaky test issues"
+        summary ""
+        summary "No failing tests, so no issues were filed or updated."
+        summary ""
+        return 0
+    fi
+
+    failed_count=$(grep -c '' "${failed_tests_file}")
+    info "Filing issues for $(hl "${failed_count}") failing test(s) on $(hl "${repo}")..."
+
+    ## Ensure the label exists
+    # Created only when absent, so a label whose color or description someone has
+    # customized is left alone. It exists on stacks-network/stacks-core but not
+    # necessarily on a fork, and `gh issue create --label` fails on a missing label.
+    # Read the list into a variable rather than piping gh into grep -q: grep -q
+    # exits on the first match, which can SIGPIPE gh, and under pipefail that
+    # would make this condition read false and send us on to create a label that
+    # already exists.
+    existing_labels=$(gh label list --repo "${repo}" --limit 200 --json name --jq '.[].name')
+
+    if grep -qxF "${flaky_label}" <<< "${existing_labels}"; then
+        info "Label already exists: $(hl "${flaky_label}")"
+    else
+        info "Creating label: $(hl "${flaky_label}")"
+        gh_mutate label create "${flaky_label}" --repo "${repo}" \
+            --color "${flaky_label_color}" \
+            --description "Test that fails intermittently in CI"
+    fi
+
+    ## Load the issues we already filed
+    # One listing, reused for every test: a few API calls instead of one per test.
+    existing_issues="$(mktemp)"
+
+    gh issue list --repo "${repo}" --label "${flaky_label}" --state all \
+        --limit 500 --json number,state,body > "${existing_issues}"
+
+    info "Found $(hl "$(jq 'length' "${existing_issues}")") existing $(hl "${flaky_label}") issue(s)"
+
+    ## File or update one issue per failing test
+    while IFS= read -r record; do
+        name=$(jq -r '.name' <<< "${record}")
+        duration=$(jq -r '.time' <<< "${record}")
+        excerpt=$(jq -r '.excerpt' <<< "${record}")
+        [[ -z "${name}" ]] && continue
+
+        marker="<!-- ${id_marker_prefix}: ${name} -->"
+
+        # The evidence comment, identical whether the issue is new or existing
+        comment_file="$(mktemp)"
+        {
+            echo "### Failure - ${today}"
+            echo
+            echo "- **Run:** [${GITHUB_RUN_ID:-unknown}](${run_url})"
+            echo "- **Commit:** \`${GITHUB_SHA:-unknown}\` on \`${GITHUB_REF_NAME:-unknown}\`"
+            echo "- **Duration:** ${duration}s"
+            echo
+            echo "${fence}text"
+            printf '%s\n' "${excerpt}"
+            echo "${fence}"
+            echo
+            echo "Full test output is in the run's job log, which is subject to GitHub retention policy."
+        } > "${comment_file}"
+
+        # Exact-match the marker against the bodies we already have
+        match=$(jq -r --arg marker "${marker}" '
+            map(select(.body != null and (.body | contains($marker))))
+            | if length == 0 then "" else "\(.[0].number) \(.[0].state)" end
+        ' "${existing_issues}")
+
+        if [[ -z "${match}" ]]; then
+            if (( created >= max_new_issues )); then
+                deferred+=("${name}")
+                rm -f "${comment_file}"
+                continue
+            fi
+
+            body_file="$(mktemp)"
+            {
+                echo "The following test looks flaky: \`${name}\`."
+                echo
+                echo "**Triage**"
+                echo
+                echo "- [ ] Reproduced"
+                echo "- [ ] Classified: test bug or production bug"
+                echo "- [ ] Root cause identified"
+                echo
+                echo "> Filed automatically by \`tests-flaky-nightly.yml\`."
+                echo
+                echo "${marker}"
+            } > "${body_file}"
+
+            info "Creating issue for $(hl "${name}")"
+            url=$(gh_mutate issue create --repo "${repo}" \
+                --title "[Flaky Test] ${name}" \
+                --label "${flaky_label}" \
+                --body-file "${body_file}" || true)
+            rm -f "${body_file}"
+
+            # Post the first evidence as a comment too, so a new issue and an old
+            # one carry the same shape of history
+            if [[ -n "${url}" ]]; then
+                number="${url##*/}"
+                gh_mutate issue comment "${number}" --repo "${repo}" \
+                    --body-file "${comment_file}"
+            elif [[ "${dry_run}" == "true" ]]; then
+                info "DRY-RUN: gh issue comment <new issue> --repo ${repo} --body-file <evidence>"
+            fi
+            created=$(( created + 1 ))
+        else
+            number="${match%% *}"
+            state="${match##* }"
+
+            if [[ "${state}" == "CLOSED" ]]; then
+                info "Reopening #${number} for $(hl "${name}")"
+                gh_mutate issue reopen "${number}" --repo "${repo}"
+                reopened=$(( reopened + 1 ))
+            fi
+
+            info "Adding evidence to #${number} for $(hl "${name}")"
+            gh_mutate issue comment "${number}" --repo "${repo}" \
+                --body-file "${comment_file}"
+            updated=$(( updated + 1 ))
+        fi
+
+        rm -f "${comment_file}"
+    done < "${failed_tests_file}"
+
+    rm -f "${existing_issues}"
+
+    ## Report
+    summary "## Flaky test issues"
+    summary ""
+    if [[ "${dry_run}" == "true" ]]; then
+        summary "\`DRY_RUN\` was set: no issues were created or updated."
+        summary ""
+    fi
+    summary "| | |"
+    summary "| --- | --- |"
+    summary "| Failing tests | ${failed_count} |"
+    summary "| Issues created | ${created} |"
+    summary "| Issues updated | ${updated} |"
+    summary "| Issues reopened | ${reopened} |"
+    summary ""
+
+    if (( ${#deferred[@]} > 0 )); then
+        # Never let a cap look like clean results
+        summary "### Deferred to the next run"
+        summary ""
+        summary "The \`MAX_NEW_ISSUES\` cap of ${max_new_issues} was reached, so no issue was"
+        summary "filed for these failing tests. They will be filed on a later run."
+        summary ""
+        for name in "${deferred[@]}"; do
+            summary "- \`${name}\`"
+        done
+        summary ""
+    fi
+
+    info "Done: $(hl "${created}") created, $(hl "${updated}") updated, $(hl "${reopened}") reopened"
+}
+
 ## ── Helpers ─────────────────────────────────────────────────────────────────
+#
+# Defined after main() on purpose: bash resolves function names when they are
+# called, not when the file is parsed, so main() can read top-down while the
+# helpers it uses sit out of the way below.
 
 # Append a line to the job summary, and echo it so the log shows the report too
 summary() {
@@ -97,177 +281,9 @@ gh_mutate() {
     gh "$@"
 }
 
-## ── Preflight: issues must be enabled ──────────────────────────────────────
-# Forks have Issues disabled by default, and every gh issue call then fails
-# with "repository has disabled issues". Check once, with the fix inline,
-# rather than letting the first API call fail opaquely.
-if [[ "$(gh api "repos/${repo}" --jq '.has_issues')" != "true" ]]; then
-    error "Issues are disabled on $(hl "${repo}"), so no issue can be filed!"
-    exit 1
+## ── Entry point ─────────────────────────────────────────────────────────────
+# Guarded so a test harness can source this file and exercise the helpers above
+# in isolation without running the whole thing.
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+    main "$@"
 fi
-
-## ── Nothing to do? ──────────────────────────────────────────────────────────
-if [[ ! -s "${failed_tests_file}" ]]; then
-    info "No failures in $(hl "${failed_tests_file}") - nothing to file"
-    summary "## Flaky test issues"
-    summary ""
-    summary "No failing tests, so no issues were filed or updated."
-    summary ""
-    exit 0
-fi
-
-failed_count=$(grep -c '' "${failed_tests_file}")
-info "Filing issues for $(hl "${failed_count}") failing test(s) on $(hl "${repo}")..."
-
-## ── Ensure the label exists ─────────────────────────────────────────────────
-# Created only when absent, so a label whose color or description someone has
-# customized is left alone. It exists on stacks-network/stacks-core but not
-# necessarily on a fork, and `gh issue create --label` fails on a missing label.
-# Read the list into a variable rather than piping gh into grep -q: grep -q
-# exits on the first match, which can SIGPIPE gh, and under pipefail that
-# would make this condition read false and send us on to create a label that
-# already exists.
-existing_labels=$(gh label list --repo "${repo}" --limit 200 --json name --jq '.[].name')
-
-if grep -qxF "${flaky_label}" <<< "${existing_labels}"; then
-    info "Label already exists: $(hl "${flaky_label}")"
-else
-    info "Creating label: $(hl "${flaky_label}")"
-    gh_mutate label create "${flaky_label}" --repo "${repo}" \
-        --color "${flaky_label_color}" \
-        --description "Test that fails intermittently in CI"
-fi
-
-## ── Load the issues we already filed ────────────────────────────────────────
-# One listing, reused for every test: a few API calls instead of one per test.
-existing_issues="$(mktemp)"
-trap 'rm -f "${existing_issues}"' EXIT
-
-gh issue list --repo "${repo}" --label "${flaky_label}" --state all \
-    --limit 500 --json number,state,body > "${existing_issues}"
-
-info "Found $(hl "$(jq 'length' "${existing_issues}")") existing $(hl "${flaky_label}") issue(s)"
-
-## ── File or update one issue per failing test ───────────────────────────────
-created=0
-commented=0
-reopened=0
-deferred=()
-
-while IFS= read -r record; do
-    name=$(jq -r '.name' <<< "${record}")
-    duration=$(jq -r '.time' <<< "${record}")
-    excerpt=$(jq -r '.excerpt' <<< "${record}")
-    [[ -z "${name}" ]] && continue
-
-    marker="<!-- ${id_marker_prefix}: ${name} -->"
-
-    # The evidence comment, identical whether the issue is new or existing
-    comment_file="$(mktemp)"
-    {
-        echo "### Failure - ${today}"
-        echo
-        echo "- **Run:** [${GITHUB_RUN_ID:-unknown}](${run_url})"
-        echo "- **Commit:** \`${GITHUB_SHA:-unknown}\` on \`${GITHUB_REF_NAME:-unknown}\`"
-        echo "- **Duration:** ${duration}s"
-        echo
-        echo "${fence}text"
-        printf '%s\n' "${excerpt}"
-        echo "${fence}"
-        echo
-        echo "Full test output is in the run's job log, which GitHub retains for 90 days."
-    } > "${comment_file}"
-
-    # Exact-match the marker against the bodies we already have
-    match=$(jq -r --arg marker "${marker}" '
-        map(select(.body != null and (.body | contains($marker))))
-        | if length == 0 then "" else "\(.[0].number) \(.[0].state)" end
-    ' "${existing_issues}")
-
-    if [[ -z "${match}" ]]; then
-        if (( created >= max_new_issues )); then
-            deferred+=("${name}")
-            rm -f "${comment_file}"
-            continue
-        fi
-
-        body_file="$(mktemp)"
-        {
-            echo "Filed automatically by \`tests-flaky-nightly.yml\`."
-            echo
-            echo "${marker}"
-            echo
-            echo "Every nightly run in which this test fails appends a comment below."
-            echo
-            echo "**Triage**"
-            echo
-            echo "- [ ] Reproduced"
-            echo "- [ ] Classified: test bug or production bug"
-            echo "- [ ] Root cause identified"
-        } > "${body_file}"
-
-        info "Creating issue for $(hl "${name}")"
-        url=$(gh_mutate issue create --repo "${repo}" \
-            --title "[Flaky Test] ${name}" \
-            --label "${flaky_label}" \
-            --body-file "${body_file}" || true)
-        rm -f "${body_file}"
-
-        # Post the first evidence as a comment too, so a new issue and an old
-        # one carry the same shape of history
-        if [[ -n "${url}" ]]; then
-            number="${url##*/}"
-            gh_mutate issue comment "${number}" --repo "${repo}" \
-                --body-file "${comment_file}"
-        elif [[ "${dry_run}" == "true" ]]; then
-            info "DRY-RUN: gh issue comment <new issue> --repo ${repo} --body-file <evidence>"
-        fi
-        created=$(( created + 1 ))
-    else
-        number="${match%% *}"
-        state="${match##* }"
-
-        if [[ "${state}" == "CLOSED" ]]; then
-            info "Reopening #${number} for $(hl "${name}")"
-            gh_mutate issue reopen "${number}" --repo "${repo}"
-            reopened=$(( reopened + 1 ))
-        fi
-
-        info "Commenting on #${number} for $(hl "${name}")"
-        gh_mutate issue comment "${number}" --repo "${repo}" \
-            --body-file "${comment_file}"
-        commented=$(( commented + 1 ))
-    fi
-
-    rm -f "${comment_file}"
-done < "${failed_tests_file}"
-
-## ── Report ──────────────────────────────────────────────────────────────────
-summary "## Flaky test issues"
-summary ""
-if [[ "${dry_run}" == "true" ]]; then
-    summary "\`DRY_RUN\` was set: no issues were created or updated."
-    summary ""
-fi
-summary "| | |"
-summary "| --- | --- |"
-summary "| Failing tests | ${failed_count} |"
-summary "| Issues created | ${created} |"
-summary "| Issues commented | ${commented} |"
-summary "| Issues reopened | ${reopened} |"
-summary ""
-
-if (( ${#deferred[@]} > 0 )); then
-    # Never let a cap look like clean results
-    summary "### Deferred to the next run"
-    summary ""
-    summary "The \`MAX_NEW_ISSUES\` cap of ${max_new_issues} was reached, so no issue was"
-    summary "filed for these failing tests. They will be filed on a later run."
-    summary ""
-    for name in "${deferred[@]}"; do
-        summary "- \`${name}\`"
-    done
-    summary ""
-fi
-
-info "Done: $(hl "${created}") created, $(hl "${commented}") commented, $(hl "${reopened}") reopened"
