@@ -78,19 +78,35 @@ xpath() {
 # of failure is a later step.
 excerpt() {
     local text="$1"
+
+    # An empty failure element carries no diagnostic at all: nextest emits
+    # a bare <failure type="test failure"/> in some versions when output
+    # storage is disabled. Handle it explicitly - otherwise the greps below
+    # match nothing, exit 1, and pipefail plus set -e abort the whole script,
+    # losing the entire report.
+    if [[ -z "${text//[[:space:]]/}" ]]; then
+        printf '%s' '(no failure detail in the JUnit report; see the job log)'
+        return 0
+    fi
+
     if grep -qi 'panicked at' <<< "${text}"; then
         grep -i -A"$(( excerpt_lines - 1 ))" 'panicked at' <<< "${text}" \
+            | sed '/[Ss]tack backtrace:/Q' \
             | head -n "${excerpt_lines}"
     else
         grep -v '^[[:space:]]*$' <<< "${text}" | tail -n 15
-    fi | sed 's/[[:space:]]*$//'
+    # A trailing `|| true` because this helper is best-effort by design: no
+    # shape of failure output should be able to fail the run.
+    fi | sed 's/[[:space:]]*$//' || true
 }
 
-# Append a line to the job summary, and echo it so the log shows the report too
+# Append a line to the job summary, and echo it so the log shows the report
+# too. printf rather than echo: the raw results block below contains JSON with
+# backslash escapes, which some echo implementations would interpret.
 summary() {
-    echo "$*"
+    printf '%s\n' "$*"
     if [[ -n "${GITHUB_STEP_SUMMARY:-}" ]]; then
-        echo "$*" >> "${GITHUB_STEP_SUMMARY}"
+        printf '%s\n' "$*" >> "${GITHUB_STEP_SUMMARY}"
     fi
 }
 
@@ -136,11 +152,19 @@ for report in "${reports[@]}"; do
         # names contain no quotes, so embedding one in the XPath is safe.
         duration=$(xpath "string(//testcase[@name='${name}']/@time)" "${report}" \
             | awk '{printf "%.0f", $1}')
-        message=$(xpath "string(//testcase[@name='${name}']/*[self::failure or self::error]/@message)" "${report}")
-        body=$(xpath "//testcase[@name='${name}']/*[self::failure or self::error]/text()" "${report}")
+        # string() gives the element's decoded string value. text() would
+        # return a node-set that xmllint re-serializes, leaving &lt; and
+        # friends escaped in the output.
+        failure_text=$(xpath "string(//testcase[@name='${name}']/*[self::failure or self::error])" "${report}")
 
-        excerpt_text="$(excerpt "${message}
-${body}")"
+        # nextest repeats the first line of the body in @message, so prefer
+        # the body and fall back to @message only when the body is empty -
+        # which is what happens when the test process aborts.
+        if [[ -z "${failure_text//[[:space:]]/}" ]]; then
+            failure_text=$(xpath "string(//testcase[@name='${name}']/*[self::failure or self::error]/@message)" "${report}")
+        fi
+
+        excerpt_text="$(excerpt "${failure_text}")"
 
         jq -nc \
             --arg name "${name}" \
@@ -188,6 +212,21 @@ else
     summary ""
     summary "Retries are disabled on this profile, so each of these failed on a"
     summary "single attempt against the default branch."
+    summary ""
+
+    # The full records, collapsed so they do not dominate the summary. Useful
+    # when the table alone does not explain a failure, and the only other
+    # copy of this data is the job log.
+    summary "<details>"
+    summary "<summary>Raw results (<code>${failed_tests_file}</code>)</summary>"
+    summary ""
+    summary '```json'
+    while IFS= read -r record; do
+        summary "${record}"
+    done < "${failed_tests_file}"
+    summary '```'
+    summary ""
+    summary "</details>"
     summary ""
 fi
 

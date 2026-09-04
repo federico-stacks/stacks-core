@@ -22,6 +22,25 @@ status-level = "pass"
 # Create JUnit output that we can parse
 path = "../../../junit.xml"
 
+# Do not store captured stdout/stderr in the report.
+#
+# Integration test output with RUST_BACKTRACE=full reaches tens of megabytes
+# per test. Every failing test uploads its report as an artifact, which the
+# nightly's report job then downloads and parses, so the size is paid three
+# times over for output nothing reads.
+#
+# What survives is nextest's own verdict in the `message` attribute: the panic
+# location and thread, the abort signal, or the timeout. The full output stays
+# in the job log, which GitHub retains for 90 days.
+#
+# Safe to disable: the only consumer of these reports is the summary job in
+# ci.yml, which matches the classname/name/time attributes and the retry
+# element names, never the output.
+store-failure-output = false
+# Already the nextest default; set explicitly so a change of default cannot
+# silently start embedding passing tests' output.
+store-success-output = false
+
 [profile.ci-sequential]
 inherits = "ci"
 # The number of tests to run simultaneously
