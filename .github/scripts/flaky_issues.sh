@@ -1,31 +1,61 @@
 #!/usr/bin/env bash
 #
-# Files one GitHub issue per flaky test, from the results of flaky_report.sh.
+# Keeps one GitHub issue per flaky test in step with the nightly's results.
+#
+# Two phases, both driven by observed-tests.jsonl from flaky_report.sh:
+#
+#   1. Tests that FAILED    -> file a new issue, or comment on the existing one
+#   2. Tests that PASSED    -> close the issue once the test has been quiet for
+#                              QUIET_AFTER scheduled nightly runs
+#
+# A test absent from the results is left alone here: it may simply not have run
+# (a narrowed `only-tests` matrix, an excluded test, or a partition that never
+# reported). One run's absence says nothing, but absence that persists says
+# plenty - step 5b in the plan closes an issue once its test has gone unobserved
+# for ORPHAN_AFTER runs, which needs no judgement about why.
 #
 # One issue per test, so the issue becomes that test's record: every nightly run
 # in which it fails appends a comment. Evidence is written as text rather than
 # only as a link, because Actions job logs are deleted after 90 days (the API
 # returns HTTP 410) while the issue is permanent.
 #
+# Closing rather than labelling is deliberate: the failure phase already reopens
+# a closed issue, so closing composes with behaviour that already exists, and
+# open-vs-closed is a stronger signal than a label because GitHub hides closed
+# issues by default. The `flaky` label is preserved on close.
+#
 # Required env vars:
-#   GH_TOKEN          - token with issues:write on GITHUB_REPOSITORY
-#   GITHUB_REPOSITORY - owner/repo to file issues against
+#   GH_TOKEN            - token with issues:write on GITHUB_REPOSITORY
+#   GITHUB_REPOSITORY   - owner/repo to file issues against
 #
 # Optional env vars:
-#   FAILED_TESTS_FILE - JSONL produced by flaky_report.sh
-#                       (default: failed-tests.jsonl)
-#   FLAKY_LABEL       - label applied to every issue, created if absent
-#                       (default: flaky)
-#   FLAKY_LABEL_COLOR - colour used only when creating the label
-#                       (default: 58BCF1, matching stacks-network/stacks-core)
-#   MAX_NEW_ISSUES    - cap on issues CREATED in one run. Commenting on issues
-#                       that already exist is never capped. Anything deferred is
-#                       named in the job summary, never dropped silently
-#                       (default: 10)
-#   DRY_RUN           - "true" to print every mutation instead of performing it
+#   OBSERVED_TESTS_FILE - JSONL produced by flaky_report.sh
+#                         (default: observed-tests.jsonl)
+#   FLAKY_LABEL         - label applied to every issue, created if absent
+#                         (default: flaky)
+#   FLAKY_LABEL_COLOR   - colour used only when creating the label
+#                         (default: 58BCF1, matching stacks-network/stacks-core)
+#   MAX_NEW_ISSUES      - cap on issues CREATED in one run. Commenting on issues
+#                         that already exist is never capped. Anything deferred
+#                         is named in the job summary, never dropped silently
+#                         (default: 10)
+#   QUIET_AFTER         - how many quiet scheduled runs before an issue is
+#                         closed. 0 closes as soon as the test passes
+#                         (default: 14)
+#   QUIET_RUN_EVENTS    - comma-separated workflow event names that count as a
+#                         chance for the test to fail; surrounding whitespace is
+#                         trimmed, so "schedule, workflow_dispatch" works.
+#                         Scheduled runs are always full-width, which is what
+#                         makes them a fair measure; `workflow_dispatch` can be
+#                         added to exercise the threshold without waiting for
+#                         the cron
+#                         (default: schedule)
+#   NIGHTLY_WORKFLOW    - workflow whose run history is counted
+#                         (default: tests-flaky-nightly.yml)
+#   DRY_RUN             - "true" to print every mutation instead of performing it
 #
-# Not in scope: classifying failures by mode, failure-rate tracking, dormancy,
-# job-log links. Those are separate steps so each can be reviewed on its own.
+# Not in scope: classifying failures by mode, failure-rate tracking, job-log
+# links, orphaned issues. Those are separate steps.
 #
 # Exit behaviour:
 #   Exits 0 when triage completed. Test failures are reported by the test jobs
@@ -41,16 +71,23 @@ source "${script_dir}/logging.sh"
 
 ## --- Configuration ----------------------------------------------------------
 repo="${GITHUB_REPOSITORY:-}"
-failed_tests_file="${FAILED_TESTS_FILE:-failed-tests.jsonl}"
+observed_tests_file="${OBSERVED_TESTS_FILE:-observed-tests.jsonl}"
 flaky_label="${FLAKY_LABEL:-flaky}"
 flaky_label_color="${FLAKY_LABEL_COLOR:-58BCF1}"
 max_new_issues="${MAX_NEW_ISSUES:-10}"
+quiet_after="${QUIET_AFTER:-14}"
+quiet_run_events="${QUIET_RUN_EVENTS:-schedule}"
+nightly_workflow="${NIGHTLY_WORKFLOW:-tests-flaky-nightly.yml}"
 dry_run="${DRY_RUN:-false}"
 
 # Marker carrying the fully qualified test name. Dedup keys on this rather than
 # on the issue title: test names share long prefixes, so title or prefix
 # matching would eventually merge two distinct tests into one issue.
 id_marker_prefix="test-id"
+
+# Heading that starts every evidence comment. Also how the close phase finds the
+# date of the most recent failure, so the two must stay in step.
+failure_heading="### Failure - "
 
 # Long enough that captured output containing triple backticks cannot break out
 fence='`````'
@@ -80,10 +117,8 @@ fi
 
 ## ── Main ────────────────────────────────────────────────────────────────────
 main() {
-    local failed_count existing_labels existing_issues
-    local record name duration excerpt marker comment_file body_file
-    local match number state url
-    local created=0 updated=0 reopened=0
+    local existing_issues existing_labels observed_count failed_count
+    local created=0 updated=0 reopened=0 closed=0
     local -a deferred=()
 
     ## Preflight: issues must be enabled
@@ -95,18 +130,32 @@ main() {
         return 1
     fi
 
-    ## Nothing to do?
-    if [[ ! -s "${failed_tests_file}" ]]; then
-        info "No failures in $(hl "${failed_tests_file}") - nothing to file"
+    ## Precondition: this run must have observed something
+    # -s, not -f: flaky_report.sh creates the file and *then* returns early when a
+    # run produced no JUnit reports at all, so the file exists and is empty. That
+    # is the case worth catching, and the artifact download is continue-on-error,
+    # so a failed download reaches here looking like a run in which nothing ran.
+    #
+    # Checked once for the whole script rather than per phase. With no
+    # observations there is nothing any phase can conclude: filing is already a
+    # no-op because no test is marked failed, and closing must not treat "we saw
+    # nothing" as "every test passed" - see step 5b, where absence becomes
+    # actionable and this guard is what keeps a broken download from closing
+    # every issue.
+    if [[ ! -s "${observed_tests_file}" ]]; then
+        warn "No tests were observed in this run - nothing to do"
         summary "## Flaky test issues"
         summary ""
-        summary "No failing tests, so no issues were filed or updated."
+        summary "**No test results were observed**, so no issue was filed, updated or closed."
+        summary "This is not the same as a run in which no test failed - check the archive"
+        summary "and test jobs."
         summary ""
         return 0
     fi
 
-    failed_count=$(grep -c '' "${failed_tests_file}")
-    info "Filing issues for $(hl "${failed_count}") failing test(s) on $(hl "${repo}")..."
+    observed_count=$(grep -c '' "${observed_tests_file}" || true)
+    failed_count=$(jq -s '[.[] | select(.status == "fail")] | length' "${observed_tests_file}")
+    info "Observed $(hl "${observed_count}") test(s), $(hl "${failed_count}") failing, on $(hl "${repo}")"
 
     ## Ensure the label exists
     # Created only when absent, so a label whose color or description someone has
@@ -127,16 +176,31 @@ main() {
             --description "Test that fails intermittently in CI"
     fi
 
-    ## Load the issues we already filed
-    # One listing, reused for every test: a few API calls instead of one per test.
+    ## Load the issues we already filed, once, for both phases
+    # `comments` is needed by the close phase to date each issue's last failure.
     existing_issues="$(mktemp)"
-
     gh issue list --repo "${repo}" --label "${flaky_label}" --state all \
-        --limit 500 --json number,state,body > "${existing_issues}"
+        --limit 500 --json number,state,body,comments > "${existing_issues}"
 
     info "Found $(hl "$(jq 'length' "${existing_issues}")") existing $(hl "${flaky_label}") issue(s)"
 
-    ## File or update one issue per failing test
+    file_failure_issues "${existing_issues}"
+    close_quiet_issues "${existing_issues}"
+
+    # Best-effort tidiness only: on an error path set -e aborts before this
+    # runs. Acceptable because the runner is destroyed at the end of the job
+    # and the payload is tens of KB - not worth an EXIT trap to guarantee.
+    rm -f "${existing_issues}"
+
+    report_summary
+}
+
+## ── Phase 1: tests that failed ──────────────────────────────────────────────
+file_failure_issues() {
+    local existing_issues="$1"
+    local record name duration excerpt marker comment_file body_file
+    local match number state url
+
     while IFS= read -r record; do
         name=$(jq -r '.name' <<< "${record}")
         duration=$(jq -r '.time' <<< "${record}")
@@ -148,7 +212,7 @@ main() {
         # The evidence comment, identical whether the issue is new or existing
         comment_file="$(mktemp)"
         {
-            echo "### Failure - ${today}"
+            echo "${failure_heading}${today}"
             echo
             echo "- **Run:** [${GITHUB_RUN_ID:-unknown}](${run_url})"
             echo "- **Commit:** \`${GITHUB_SHA:-unknown}\` on \`${GITHUB_REF_NAME:-unknown}\`"
@@ -161,13 +225,29 @@ main() {
             echo "Full test output is in the run's job log, which is subject to GitHub retention policy."
         } > "${comment_file}"
 
-        # Exact-match the marker against the bodies we already have
+        # Exact-match the marker against the bodies we already have.
+        #
+        # jq joins the fields with tabs and `read` splits them apart again, here
+        # and at the reads in phase 2. This is safe because @tsv escapes any tab,
+        # newline, CR or backslash *inside* a value as a two-character sequence,
+        # so a record is always one line carrying exactly the field count jq
+        # emitted - no value can mis-split the row. The trade-off is that a
+        # multi-line value would arrive with a literal `\n` in it, which is why
+        # the failure records above are read as JSON: their excerpt is multi-line
+        # by design. No match leaves both fields empty.
+        #
+        # Assigned first and read second, rather than reading straight from the
+        # substitution: `read <<< "$(jq ...)"` reports read's status, not jq's,
+        # so a jq failure would be swallowed and read as "no match" - and this
+        # script would then file a duplicate issue for a test that already has
+        # one. As an assignment, a jq failure aborts under set -e instead.
         match=$(jq -r --arg marker "${marker}" '
             map(select(.body != null and (.body | contains($marker))))
-            | if length == 0 then "" else "\(.[0].number) \(.[0].state)" end
+            | if length == 0 then "" else [.[0].number, .[0].state] | @tsv end
         ' "${existing_issues}")
+        IFS=$'\t' read -r number state <<< "${match}"
 
-        if [[ -z "${match}" ]]; then
+        if [[ -z "${number}" ]]; then
             if (( created >= max_new_issues )); then
                 deferred+=("${name}")
                 rm -f "${comment_file}"
@@ -207,9 +287,6 @@ main() {
             fi
             created=$(( created + 1 ))
         else
-            number="${match%% *}"
-            state="${match##* }"
-
             if [[ "${state}" == "CLOSED" ]]; then
                 info "Reopening #${number} for $(hl "${name}")"
                 gh_mutate issue reopen "${number}" --repo "${repo}"
@@ -223,23 +300,124 @@ main() {
         fi
 
         rm -f "${comment_file}"
-    done < "${failed_tests_file}"
+    done < <(jq -c 'select(.status == "fail")' "${observed_tests_file}")
+}
 
-    rm -f "${existing_issues}"
+## ── Phase 2: tests that passed and have gone quiet ──────────────────────────
+close_quiet_issues() {
+    local existing_issues="$1"
+    local quiet_runs number state test_id test_status last_failure quiet_count comment
+    local -A observed_status=()
 
-    ## Report
+    # Status of every test that ran, so "passed" can be told apart from "did not
+    # run". Without this a narrowed `only-tests` matrix would look like a run in
+    # which every other test passed, and would close their issues.
+    while IFS=$'\t' read -r test_id test_status; do
+        observed_status["${test_id}"]="${test_status}"
+    done < <(jq -r '[.name, .status] | @tsv' "${observed_tests_file}")
+
+    # Runs that gave every test a chance to fail. One call for the whole phase.
+    #
+    # Each event name is trimmed and empties dropped, matching how
+    # bitcoin_tests.sh already parses ONLY_TESTS. QUIET_RUN_EVENTS is a free-text
+    # workflow input, so "schedule, workflow_dispatch" is what a human naturally
+    # types - and without the trim the second name keeps its leading space,
+    # matches no event and is silently dropped. That fails safe, since an
+    # undercount only delays closing, but gives no clue why nothing closed.
+    quiet_runs=$(gh run list --repo "${repo}" --workflow "${nightly_workflow}" \
+        --limit 200 --json event,createdAt,conclusion \
+        | jq -c --arg events "${quiet_run_events}" '
+            ($events
+             | split(",")
+             | map(gsub("^\\s+|\\s+$"; ""))
+             | map(select(length > 0))) as $want
+            | [ .[]
+                | select((.event as $e | $want | index($e)) and .conclusion != "cancelled")
+                | .createdAt ]')
+
+    # A zero count means nothing can ever close. Silent before, and the most
+    # likely cause is a typo in the event names rather than a genuine absence.
+    if [[ "$(jq 'length' <<< "${quiet_runs}")" -eq 0 ]]; then
+        warn "No $(hl "${quiet_run_events}") run(s) found - nothing can close as quiet"
+    fi
+
+    info "Counting quiet runs against $(hl "$(jq 'length' <<< "${quiet_runs}")") $(hl "${quiet_run_events}") run(s)"
+
+    while IFS=$'\t' read -r number state test_id last_failure; do
+        [[ -z "${test_id}" ]] && continue
+
+        # Only open issues can be closed
+        [[ "${state}" != "OPEN" ]] && continue
+
+        case "${observed_status[${test_id}]:-absent}" in
+            fail)
+                # Phase 1 just recorded a failure; nothing to close
+                continue
+                ;;
+            absent)
+                # The test did not run, so this run says nothing about it
+                continue
+                ;;
+        esac
+
+        # An issue with no failure comment at all counts as infinitely quiet
+        quiet_count=$(jq --arg last "${last_failure}" \
+            '[.[] | select($last == "" or . > $last)] | length' <<< "${quiet_runs}")
+
+        if (( quiet_count < quiet_after )); then
+            continue
+        fi
+
+        comment="### Closed automatically - the test has gone quiet
+
+The test passed in this run, and has not failed in the last ${quiet_count} run(s)."
+        if [[ -n "${last_failure}" ]]; then
+            comment="${comment}
+Last recorded failure: ${last_failure%%T*}."
+        fi
+        comment="${comment}
+
+**If the test fails again this issue reopens automatically** with the new failure attached."
+
+        info "Closing #${number} for $(hl "${test_id}") after $(hl "${quiet_count}") quiet run(s)"
+        gh_mutate issue close "${number}" --repo "${repo}" --comment "${comment}"
+        closed=$(( closed + 1 ))
+    done < <(jq -r --arg prefix "${id_marker_prefix}" --arg heading "${failure_heading}" '
+        .[]
+        | select(.body != null)
+        | . as $issue
+        | ($issue.body | capture("<!--\\s*" + $prefix + ":\\s*(?<id>\\S+)\\s*-->")?) as $m
+        | select($m != null)
+        | [ $issue.number,
+            $issue.state,
+            $m.id,
+            ([$issue.comments[]? | select(.body | startswith($heading)) | .createdAt] | max) // ""
+          ]
+        | @tsv
+    ' "${existing_issues}")
+}
+
+## ── Helpers ─────────────────────────────────────────────────────────────────
+#
+# Defined after the phases on purpose: bash resolves function names when they
+# are called, not when the file is parsed, so main() can read top-down while the
+# helpers it uses sit out of the way below.
+
+report_summary() {
     summary "## Flaky test issues"
     summary ""
     if [[ "${dry_run}" == "true" ]]; then
-        summary "\`DRY_RUN\` was set: no issues were created or updated."
+        summary "\`DRY_RUN\` was set: no issues were created, updated or closed."
         summary ""
     fi
     summary "| | |"
     summary "| --- | --- |"
+    summary "| Tests observed | ${observed_count} |"
     summary "| Failing tests | ${failed_count} |"
     summary "| Issues created | ${created} |"
     summary "| Issues updated | ${updated} |"
     summary "| Issues reopened | ${reopened} |"
+    summary "| Issues closed as quiet | ${closed} |"
     summary ""
 
     if (( ${#deferred[@]} > 0 )); then
@@ -255,14 +433,8 @@ main() {
         summary ""
     fi
 
-    info "Done: $(hl "${created}") created, $(hl "${updated}") updated, $(hl "${reopened}") reopened"
+    info "Done: $(hl "${created}") created, $(hl "${updated}") updated, $(hl "${reopened}") reopened, $(hl "${closed}") closed"
 }
-
-## ── Helpers ─────────────────────────────────────────────────────────────────
-#
-# Defined after main() on purpose: bash resolves function names when they are
-# called, not when the file is parsed, so main() can read top-down while the
-# helpers it uses sit out of the way below.
 
 # Append a line to the job summary, and echo it so the log shows the report too
 summary() {

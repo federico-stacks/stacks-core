@@ -37,6 +37,16 @@ on:
         required: false
         default: false
         type: boolean
+      quiet-after:
+        description: "Quiet scheduled runs before an issue is closed (0 = close as soon as it passes)"
+        required: false
+        default: "14"
+        type: string
+      quiet-run-events:
+        description: "Workflow events that count as a chance to fail. Add workflow_dispatch to test the threshold"
+        required: false
+        default: "schedule"
+        type: string
       max-new-issues:
         description: "Cap on issues created in a single run"
         required: false
@@ -201,9 +211,11 @@ jobs:
       issues: write
     env:
       JUNIT_DIR: "nextest_files"
-      FAILED_TESTS_FILE: "failed-tests.jsonl"
+      OBSERVED_TESTS_FILE: "observed-tests.jsonl"
       FLAKY_LABEL: "flaky"
       MAX_NEW_ISSUES: ${{ inputs.max-new-issues || '10' }}
+      QUIET_AFTER: ${{ inputs.quiet-after || '14' }}
+      QUIET_RUN_EVENTS: ${{ inputs.quiet-run-events || 'schedule' }}
       DRY_RUN: ${{ inputs.dry-run == true }}
     steps:
       # Checkout the code
@@ -215,6 +227,12 @@ jobs:
             .github
 
       # Download the nextest JUnit reports produced by the test jobs
+      #   - pattern is narrowed to the per-test reports on purpose. `nextest-*`
+      #     also matches `nextest-archive`, which is ~580 MB of test archive
+      #     plus debug binaries: it would be downloaded and unpacked every run
+      #     only to be ignored, since it contains no .xml. The bitcoin suite
+      #     names its reports nextest-isolated-test-<index>; another suite added
+      #     here later would need its own naming included.
       #   - continue-on-error: a run that produced no reports failed before the
       #     tests ran. The report step says so in the summary rather than the
       #     job dying on a missing artifact.
@@ -222,7 +240,7 @@ jobs:
         continue-on-error: true
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
         with:
-          pattern: nextest-*
+          pattern: nextest-isolated-test-*
           path: ${{ env.JUNIT_DIR }}
           merge-multiple: true
 
@@ -243,5 +261,8 @@ jobs:
       - name: File Flaky Test Issues
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # actions: read is not needed - `gh run list` on a public repo works
+          # with the default token's contents scope
+          NIGHTLY_WORKFLOW: tests-flaky-nightly.yml
         run: |
           bash ./.github/scripts/flaky_issues.sh
