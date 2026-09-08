@@ -7,12 +7,15 @@
 #   1. Tests that FAILED    -> file a new issue, or comment on the existing one
 #   2. Tests that PASSED    -> close the issue once the test has been quiet for
 #                              QUIET_AFTER scheduled nightly runs
+#   2b. Tests never SEEN    -> close the issue once the test has gone unobserved
+#                              for ORPHAN_AFTER runs (renamed, deleted, excluded)
 #
-# A test absent from the results is left alone here: it may simply not have run
-# (a narrowed `only-tests` matrix, an excluded test, or a partition that never
-# reported). One run's absence says nothing, but absence that persists says
-# plenty - step 5b in the plan closes an issue once its test has gone unobserved
-# for ORPHAN_AFTER runs, which needs no judgement about why.
+# A test absent from one run is left alone: it may simply not have run (a
+# narrowed `only-tests` matrix, an excluded test, or a job that never reported).
+# One run's absence says nothing, but absence that persists says plenty, so an
+# issue closes once its test has gone unobserved for ORPHAN_AFTER runs. That
+# needs no judgement about *why* it vanished, which is the point: renamed,
+# deleted and excluded are indistinguishable from the results alone.
 #
 # One issue per test, so the issue becomes that test's record: every nightly run
 # in which it fails appends a comment. Evidence is written as text rather than
@@ -50,12 +53,16 @@
 #                         added to exercise the threshold without waiting for
 #                         the cron
 #                         (default: schedule)
+#   ORPHAN_AFTER        - how many runs a test may go *unobserved* before its
+#                         issue is closed as no longer watched. Must be greater
+#                         than QUIET_AFTER - see close_quiet_issues()
+#                         (default: 30)
 #   NIGHTLY_WORKFLOW    - workflow whose run history is counted
 #                         (default: tests-flaky-nightly.yml)
 #   DRY_RUN             - "true" to print every mutation instead of performing it
 #
-# Not in scope: classifying failures by mode, failure-rate tracking, job-log
-# links, orphaned issues. Those are separate steps.
+# Not in scope: classifying failures by mode, failure-rate tracking, and job-log
+# links. Those are separate steps.
 #
 # Exit behaviour:
 #   Exits 0 when triage completed. Test failures are reported by the test jobs
@@ -77,6 +84,7 @@ flaky_label_color="${FLAKY_LABEL_COLOR:-58BCF1}"
 max_new_issues="${MAX_NEW_ISSUES:-10}"
 quiet_after="${QUIET_AFTER:-14}"
 quiet_run_events="${QUIET_RUN_EVENTS:-schedule}"
+orphan_after="${ORPHAN_AFTER:-30}"
 nightly_workflow="${NIGHTLY_WORKFLOW:-tests-flaky-nightly.yml}"
 dry_run="${DRY_RUN:-false}"
 
@@ -115,10 +123,20 @@ if [[ -z "${GH_TOKEN:-}" ]]; then
     exit 1
 fi
 
+# ORPHAN_AFTER must exceed QUIET_AFTER, and this is load-bearing rather than
+# cosmetic - it is what stops a single job that failed to report from closing a
+# healthy test's issue. See close_quiet_issues() for the argument. Refuse to run
+# on a configuration that quietly breaks it.
+if (( orphan_after <= quiet_after )); then
+    error "$(hl "ORPHAN_AFTER") (${orphan_after}) must be greater than $(hl "QUIET_AFTER") (${quiet_after})"
+    error "Otherwise one unreported test job could close the issue of a passing test."
+    exit 1
+fi
+
 ## ── Main ────────────────────────────────────────────────────────────────────
 main() {
     local existing_issues existing_labels observed_count failed_count
-    local created=0 updated=0 reopened=0 closed=0
+    local created=0 updated=0 reopened=0 closed=0 orphaned=0
     local -a deferred=()
 
     ## Preflight: issues must be enabled
@@ -303,10 +321,26 @@ file_failure_issues() {
     done < <(jq -c 'select(.status == "fail")' "${observed_tests_file}")
 }
 
-## ── Phase 2: tests that passed and have gone quiet ──────────────────────────
+## ── Phase 2: tests that have gone quiet, by passing or by vanishing ─────────
+#
+# Two closes sharing one counter - the number of qualifying runs since the test
+# last failed:
+#
+#   pass   + quiet_count >= QUIET_AFTER   -> "went quiet"   (positive evidence)
+#   absent + quiet_count >= ORPHAN_AFTER  -> "not watched"   (negative evidence)
+#
+# ORPHAN_AFTER > QUIET_AFTER is what makes the second one safe, and the reasoning
+# is worth spelling out. For the absent branch to fire, the issue must still be
+# OPEN at quiet_count >= ORPHAN_AFTER. But any single run in which the test was
+# *observed passing* at quiet_count >= QUIET_AFTER would already have closed it
+# on the honest message, and a closed issue is skipped below. So an issue can
+# only reach the orphan threshold if the test was genuinely never observed in
+# between: one crashed job cannot get it there, because the test's other passing
+# runs close the issue first. The inequality is validated at startup.
 close_quiet_issues() {
     local existing_issues="$1"
-    local quiet_runs number state test_id test_status last_failure quiet_count comment
+    local quiet_runs number state test_id test_status last_failure quiet_count
+    local comment reason
     local -A observed_status=()
 
     # Status of every test that ran, so "passed" can be told apart from "did not
@@ -349,39 +383,44 @@ close_quiet_issues() {
         # Only open issues can be closed
         [[ "${state}" != "OPEN" ]] && continue
 
+        # Needed by both branches below, so computed before deciding which one
+        # applies. An issue with no failure comment at all counts as infinitely
+        # quiet, because every run then sorts after "no failure".
+        quiet_count=$(jq --arg last "${last_failure}" \
+            '[.[] | select($last == "" or . > $last)] | length' <<< "${quiet_runs}")
+
         case "${observed_status[${test_id}]:-absent}" in
             fail)
                 # Phase 1 just recorded a failure; nothing to close
                 continue
                 ;;
+            pass)
+                (( quiet_count >= quiet_after )) || continue
+                reason="quiet"
+                ;;
             absent)
-                # The test did not run, so this run says nothing about it
+                (( quiet_count >= orphan_after )) || continue
+                reason="orphan"
+                ;;
+            *)
+                # Only pass/fail are ever written, so this means the results
+                # format changed. Skip rather than guess at a close.
+                warn "Unknown status $(hl "${observed_status[${test_id}]}") for $(hl "${test_id}") - skipping"
                 continue
                 ;;
         esac
 
-        # An issue with no failure comment at all counts as infinitely quiet
-        quiet_count=$(jq --arg last "${last_failure}" \
-            '[.[] | select($last == "" or . > $last)] | length' <<< "${quiet_runs}")
-
-        if (( quiet_count < quiet_after )); then
-            continue
+        if [[ "${reason}" == "quiet" ]]; then
+            comment="$(quiet_comment "${quiet_count}" "${last_failure}")"
+            info "Closing #${number} for $(hl "${test_id}") after $(hl "${quiet_count}") quiet run(s)"
+            closed=$(( closed + 1 ))
+        else
+            comment="$(orphan_comment "${quiet_count}" "${last_failure}")"
+            info "Closing #${number} for $(hl "${test_id}") - unobserved for $(hl "${quiet_count}") run(s)"
+            orphaned=$(( orphaned + 1 ))
         fi
 
-        comment="### Closed automatically - the test has gone quiet
-
-The test passed in this run, and has not failed in the last ${quiet_count} run(s)."
-        if [[ -n "${last_failure}" ]]; then
-            comment="${comment}
-Last recorded failure: ${last_failure%%T*}."
-        fi
-        comment="${comment}
-
-**If the test fails again this issue reopens automatically** with the new failure attached."
-
-        info "Closing #${number} for $(hl "${test_id}") after $(hl "${quiet_count}") quiet run(s)"
         gh_mutate issue close "${number}" --repo "${repo}" --comment "${comment}"
-        closed=$(( closed + 1 ))
     done < <(jq -r --arg prefix "${id_marker_prefix}" --arg heading "${failure_heading}" '
         .[]
         | select(.body != null)
@@ -395,6 +434,46 @@ Last recorded failure: ${last_failure%%T*}."
           ]
         | @tsv
     ' "${existing_issues}")
+}
+
+## ── Closing comments ────────────────────────────────────────────────────────
+#
+# Both say what happened and that no action is needed. Kept as functions so the
+# loop above reads as decisions rather than prose.
+
+quiet_comment() {
+    local quiet_count="$1" last_failure="$2" comment
+
+    comment="### Closed automatically - the test has gone quiet
+
+The test passed in this run, and has not failed in the last ${quiet_count} run(s)."
+    if [[ -n "${last_failure}" ]]; then
+        comment="${comment}
+Last recorded failure: ${last_failure%%T*}."
+    fi
+
+    printf '%s\n' "${comment}
+
+**If the test fails again this issue reopens automatically** with the new failure attached."
+}
+
+# Deliberately vague about the cause: renamed, deleted and excluded are
+# indistinguishable from the results, and claiming one would mislead triage.
+orphan_comment() {
+    local quiet_count="$1" last_failure="$2" comment
+
+    comment="### Closed automatically - the test is no longer being watched
+
+The test has not been observed in the last ${quiet_count} run(s). It may have been
+renamed, deleted, or excluded from CI."
+    if [[ -n "${last_failure}" ]]; then
+        comment="${comment}
+Last recorded failure: ${last_failure%%T*}."
+    fi
+
+    printf '%s\n' "${comment}
+
+**If a test by this name fails again this issue reopens automatically** with the new failure attached."
 }
 
 ## ── Helpers ─────────────────────────────────────────────────────────────────
@@ -418,6 +497,7 @@ report_summary() {
     summary "| Issues updated | ${updated} |"
     summary "| Issues reopened | ${reopened} |"
     summary "| Issues closed as quiet | ${closed} |"
+    summary "| Issues closed as no longer watched | ${orphaned} |"
     summary ""
 
     if (( ${#deferred[@]} > 0 )); then
@@ -433,7 +513,7 @@ report_summary() {
         summary ""
     fi
 
-    info "Done: $(hl "${created}") created, $(hl "${updated}") updated, $(hl "${reopened}") reopened, $(hl "${closed}") closed"
+    info "Done: $(hl "${created}") created, $(hl "${updated}") updated, $(hl "${reopened}") reopened, $(hl "${closed}") closed, $(hl "${orphaned}") orphaned"
 }
 
 # Append a line to the job summary, and echo it so the log shows the report too

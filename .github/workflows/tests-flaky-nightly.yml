@@ -47,6 +47,11 @@ on:
         required: false
         default: "schedule"
         type: string
+      orphan-after:
+        description: "Runs a test may go unobserved before its issue closes as unwatched (must exceed quiet-after)"
+        required: false
+        default: "30"
+        type: string
       max-new-issues:
         description: "Cap on issues created in a single run"
         required: false
@@ -216,6 +221,7 @@ jobs:
       MAX_NEW_ISSUES: ${{ inputs.max-new-issues || '10' }}
       QUIET_AFTER: ${{ inputs.quiet-after || '14' }}
       QUIET_RUN_EVENTS: ${{ inputs.quiet-run-events || 'schedule' }}
+      ORPHAN_AFTER: ${{ inputs.orphan-after || '30' }}
       DRY_RUN: ${{ inputs.dry-run == true }}
     steps:
       # Checkout the code
