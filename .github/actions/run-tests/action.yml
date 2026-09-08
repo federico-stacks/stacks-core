@@ -31,7 +31,7 @@ inputs:
     description: |
       Nextest profile override. Empty (the default) keeps the profile each run
       mode has always used: `ci-sequential` for named tests, `ci-parallel` for
-      partitioned runs. The nightly flakiness hunt passes `ci-nightly`.
+      partitioned runs. The nightly flakiness scan passes `flaky-scan`.
     required: false
     default: ""
   upload-junit-xml:

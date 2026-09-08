@@ -53,11 +53,11 @@ inherits = "ci"
 # Options: A positive integer (e.g., 4), "num-cpus", or a negative integer (e.g., -1)
 test-threads = "num-cpus"
 
-# Profile for the nightly flakiness hunt (`tests-flaky-nightly.yml`).
+# Profile for the nightly flakiness scan (`tests-flaky-scan-nightly.yml`).
 #
-# The nightly exists to *measure* flakiness, so it deliberately diverges from
+# This scan exists to *measure* flakiness, so it deliberately diverges from
 # the `ci` profile. Do not "fix" these settings to match `ci`.
-[profile.ci-nightly]
+[profile.flaky-scan]
 inherits = "ci"
 # A single attempt per test IS the datapoint. With retries a test that fails and
 # then passes reports green, which hides exactly the fail-then-pass flakes this

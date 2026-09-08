@@ -67,7 +67,7 @@
 #                         in main()
 #                         (default: 15)
 #   NIGHTLY_WORKFLOW    - workflow whose run history is counted
-#                         (default: tests-flaky-nightly.yml)
+#                         (default: tests-flaky-scan-nightly.yml)
 #   DRY_RUN             - "true" to print every mutation instead of performing it
 #
 # Not in scope: classifying failures by mode, failure-rate tracking, and job-log
@@ -107,7 +107,7 @@ quiet_after="${QUIET_AFTER:-14}"
 quiet_run_events="${QUIET_RUN_EVENTS:-schedule}"
 orphan_after="${ORPHAN_AFTER:-30}"
 mass_failure_threshold="${MASS_FAILURE_THRESHOLD:-15}"
-nightly_workflow="${NIGHTLY_WORKFLOW:-tests-flaky-nightly.yml}"
+nightly_workflow="${NIGHTLY_WORKFLOW:-tests-flaky-scan-nightly.yml}"
 dry_run="${DRY_RUN:-false}"
 
 # Marker carrying the fully qualified test name. Dedup keys on this rather than
@@ -348,7 +348,7 @@ file_failure_issues() {
                 echo "- [ ] Classified: test bug or production bug"
                 echo "- [ ] Root cause identified"
                 echo
-                echo "> Filed automatically by \`tests-flaky-nightly.yml\`."
+                echo "> Filed automatically by \`tests-flaky-scan-nightly.yml\`."
                 echo
                 echo "${marker}"
             } > "${body_file}"

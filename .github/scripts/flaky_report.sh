@@ -3,7 +3,7 @@
 # Reports the outcome of every test in a nightly flakiness run.
 #
 # Reads the nextest JUnit reports produced by the test jobs and records what
-# happened to each test that ran. The nightly runs the `ci-nightly` profile with
+# happened to each test that ran. The nightly runs the `flaky-scan` profile with
 # `retries = 0`, so every failure here is a single-attempt failure against the
 # default branch - a flake candidate, not a retry artifact and not caused by a
 # pull request's changes.
