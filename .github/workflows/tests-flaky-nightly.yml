@@ -52,6 +52,11 @@ on:
         required: false
         default: "30"
         type: string
+      mass-failure-threshold:
+        description: "Failures at or above which the run is treated as broken: nothing filed, nothing closed as unwatched"
+        required: false
+        default: "15"
+        type: string
       max-new-issues:
         description: "Cap on issues created in a single run"
         required: false
@@ -222,6 +227,7 @@ jobs:
       QUIET_AFTER: ${{ inputs.quiet-after || '14' }}
       QUIET_RUN_EVENTS: ${{ inputs.quiet-run-events || 'schedule' }}
       ORPHAN_AFTER: ${{ inputs.orphan-after || '30' }}
+      MASS_FAILURE_THRESHOLD: ${{ inputs.mass-failure-threshold || '15' }}
       DRY_RUN: ${{ inputs.dry-run == true }}
     steps:
       # Checkout the code

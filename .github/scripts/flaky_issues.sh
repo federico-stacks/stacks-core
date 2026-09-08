@@ -10,6 +10,10 @@
 #   2b. Tests never SEEN    -> close the issue once the test has gone unobserved
 #                              for ORPHAN_AFTER runs (renamed, deleted, excluded)
 #
+# A run that failed MASS_FAILURE_THRESHOLD or more tests is treated as broken
+# rather than flaky: none of the three phases runs, because the results are not
+# trustworthy evidence about any individual test - see the guard in main().
+#
 # A test absent from one run is left alone: it may simply not have run (a
 # narrowed `only-tests` matrix, an excluded test, or a job that never reported).
 # One run's absence says nothing, but absence that persists says plenty, so an
@@ -57,6 +61,11 @@
 #                         issue is closed as no longer watched. Must be greater
 #                         than QUIET_AFTER - see close_quiet_issues()
 #                         (default: 30)
+#   MASS_FAILURE_THRESHOLD
+#                       - failures at or above which the run is treated as
+#                         broken and no issue is touched at all. See the guard
+#                         in main()
+#                         (default: 15)
 #   NIGHTLY_WORKFLOW    - workflow whose run history is counted
 #                         (default: tests-flaky-nightly.yml)
 #   DRY_RUN             - "true" to print every mutation instead of performing it
@@ -85,6 +94,7 @@ max_new_issues="${MAX_NEW_ISSUES:-10}"
 quiet_after="${QUIET_AFTER:-14}"
 quiet_run_events="${QUIET_RUN_EVENTS:-schedule}"
 orphan_after="${ORPHAN_AFTER:-30}"
+mass_failure_threshold="${MASS_FAILURE_THRESHOLD:-15}"
 nightly_workflow="${NIGHTLY_WORKFLOW:-tests-flaky-nightly.yml}"
 dry_run="${DRY_RUN:-false}"
 
@@ -137,6 +147,7 @@ fi
 main() {
     local existing_issues existing_labels observed_count failed_count
     local created=0 updated=0 reopened=0 closed=0 orphaned=0
+    local run_looks_broken="false"
     local -a deferred=()
 
     ## Preflight: issues must be enabled
@@ -174,6 +185,43 @@ main() {
     observed_count=$(grep -c '' "${observed_tests_file}" || true)
     failed_count=$(jq -s '[.[] | select(.status == "fail")] | length' "${observed_tests_file}")
     info "Observed $(hl "${observed_count}") test(s), $(hl "${failed_count}") failing, on $(hl "${repo}")"
+
+    ## Mass-failure guard: is this a flaky run, or a broken one?
+    #
+    # Far more failures than flakiness can explain means the run itself broke - a
+    # bitcoind cache miss, a toolchain break, a corrupt archive - and its results
+    # say nothing about any individual test.
+    #
+    # The cost this avoids is not inbox noise, which MAX_NEW_ISSUES already
+    # bounds. Commenting on an issue that already exists is deliberately
+    # uncapped, and every comment starts with the failure heading that
+    # last_failure is derived from - so a spurious mass failure resets the clock
+    # on every issue it touches and pushes each quiet-close back by the whole
+    # QUIET_AFTER window. That cannot be undone: the comment is the record.
+    #
+    # An absolute count, not a fraction of observed tests: observed_count only
+    # counts tests that *reported*, and a broken run has fewer of those, so the
+    # ratio moves for the wrong reason. 50 failures is 11% of a full run but 45%
+    # of one where three partitions of four never reported - same damage, and the
+    # fraction is measuring survivorship rather than breakage. An absolute count
+    # also needs no floor to keep a narrowed `only-tests` run (1 observed, 1
+    # failing, 100%) from tripping it.
+    #
+    # Returns from main() rather than gating the phases individually, for the
+    # same reason the precondition above does: with the run's results in doubt
+    # there is nothing any phase can soundly conclude from them. Quiet-closing
+    # could arguably survive - it needs an observed *pass*, which breakage cannot
+    # fabricate - but it would only bring forward by one night a close the next
+    # healthy run makes anyway, and it is not worth a second shape of "should we
+    # act on this run" threaded through the phase functions. Skipping early also
+    # avoids the label check and the issue listing.
+    if (( failed_count >= mass_failure_threshold )); then
+        run_looks_broken="true"
+        warn "$(hl "${failed_count}") failures at or above $(hl "MASS_FAILURE_THRESHOLD")=$(hl "${mass_failure_threshold}")"
+        warn "Treating this run as broken: nothing will be filed, commented on, or closed"
+        report_summary
+        return 0
+    fi
 
     ## Ensure the label exists
     # Created only when absent, so a label whose color or description someone has
@@ -485,6 +533,23 @@ Last recorded failure: ${last_failure%%T*}."
 report_summary() {
     summary "## Flaky test issues"
     summary ""
+    if [[ "${run_looks_broken}" == "true" ]]; then
+        # Never let a suppressed run read as a quiet one
+        summary "### This run looks broken, not flaky"
+        summary ""
+        summary "${failed_count} of ${observed_count} observed tests failed, at or above the"
+        summary "\`MASS_FAILURE_THRESHOLD\` of ${mass_failure_threshold}. A failure count that high"
+        summary "usually means the run itself broke - a cache miss, a toolchain break, a corrupt"
+        summary "archive - rather than that ${failed_count} tests are independently flaky."
+        summary ""
+        summary "**No issue was filed, commented on, closed or reopened.**"
+        summary "Recording these failures would reset every affected issue's last-failure date and"
+        summary "delay its closure by the whole quiet window. The failing tests are listed in the"
+        summary "report above, and in the run's JSONL artifact."
+        summary ""
+        summary "If the failures turn out to be unrelated to each other, this threshold is too low."
+        summary ""
+    fi
     if [[ "${dry_run}" == "true" ]]; then
         summary "\`DRY_RUN\` was set: no issues were created, updated or closed."
         summary ""
