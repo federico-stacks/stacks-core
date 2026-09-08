@@ -74,8 +74,20 @@
 # links. Those are separate steps.
 #
 # Exit behaviour:
-#   Exits 0 when triage completed. Test failures are reported by the test jobs
-#   themselves; failing here would only hide the summary this produces.
+#   Exits 0 when triage completed, whether or not any test failed. Flaky tests
+#   are the expected output of this workflow and the test jobs already report
+#   them, so failing here for a test failure would make the run's status
+#   meaningless - it would be red every night.
+#
+#   Exits 1 when triage was REFUSED: no results were observed, or the run failed
+#   so many tests that it cannot be trusted. Both cases mean nothing was filed,
+#   commented on or closed, and neither is visible in the results otherwise - a
+#   failed artifact download can even leave the whole workflow green. The exit
+#   code is what makes the run's status honest, and is what the Slack step keys
+#   on (see the `notify` job).
+#
+#   The summary is written before either exit, and GitHub renders it regardless,
+#   so failing costs no diagnostics.
 
 set -euo pipefail
 
@@ -179,7 +191,9 @@ main() {
         summary "This is not the same as a run in which no test failed - check the archive"
         summary "and test jobs."
         summary ""
-        return 0
+        # Non-zero on purpose: the artifact download is continue-on-error, so a
+        # run that verified nothing could otherwise finish green.
+        return 1
     fi
 
     observed_count=$(grep -c '' "${observed_tests_file}" || true)
@@ -220,7 +234,11 @@ main() {
         warn "$(hl "${failed_count}") failures at or above $(hl "MASS_FAILURE_THRESHOLD")=$(hl "${mass_failure_threshold}")"
         warn "Treating this run as broken: nothing will be filed, commented on, or closed"
         report_summary
-        return 0
+        # Non-zero on purpose. The run is red from the test failures either way,
+        # but this distinguishes "the guard suppressed everything" from a normal
+        # flaky night, which is otherwise indistinguishable: no issue is touched
+        # and no error is raised.
+        return 1
     fi
 
     ## Ensure the label exists
@@ -593,9 +611,9 @@ summary() {
 gh_mutate() {
     if [[ "${dry_run}" == "true" ]]; then
         info "DRY-RUN: gh $*"
-        return 0
-    fi
-    gh "$@"
+    else 
+        gh "$@"
+    fi    
 }
 
 ## ── Entry point ─────────────────────────────────────────────────────────────

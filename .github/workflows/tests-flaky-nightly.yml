@@ -67,6 +67,11 @@ on:
         required: false
         default: "ci-nightly"
         type: string
+      slack-notify:
+        description: "Post to Slack if the run breaks (scheduled runs always do)"
+        required: false
+        default: false
+        type: boolean
 
 # Set default permissions for all jobs
 permissions:
@@ -245,11 +250,17 @@ jobs:
       #     only to be ignored, since it contains no .xml. The bitcoin suite
       #     names its reports nextest-isolated-test-<index>; another suite added
       #     here later would need its own naming included.
-      #   - continue-on-error: a run that produced no reports failed before the
-      #     tests ran. The report step says so in the summary rather than the
-      #     job dying on a missing artifact.
+      #   - allowed to fail the job. download-artifact hard-errors when the
+      #     pattern matches nothing, and that is the clearest possible report of
+      #     "there were no results": the step's own name says which stage broke.
+      #     It used to carry continue-on-error so the report script could
+      #     explain the situation in the job summary instead, but that summary
+      #     tells the reader to check the archive and test jobs - actively wrong
+      #     advice when it was the fetch that failed, and the run finished green
+      #     besides. Both are fixed at the source now, and failing here also
+      #     stops a partial fetch from being triaged as though whole partitions'
+      #     tests had vanished.
       - name: Download nextest JUnit artifacts
-        continue-on-error: true
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
         with:
           pattern: nextest-isolated-test-*
@@ -278,3 +289,124 @@ jobs:
           NIGHTLY_WORKFLOW: tests-flaky-nightly.yml
         run: |
           bash ./.github/scripts/flaky_issues.sh
+
+  ############################################################################
+  ### Slack Alert
+  ###
+  ### Posts ONLY when the harness misbehaves - never when a test fails.
+  ###
+  ### This workflow is red almost every night by design: failing tests are its
+  ### expected output. Alerting on that would train everyone to mute the
+  ### channel, and the real breakages would then be invisible too. So
+  ### `tests-bitcoin` is deliberately absent from the condition below - its
+  ### result is `failure` whenever any test fails, and carries no information.
+  ###
+  ### Omitting it costs nothing, because a harness failure inside it still
+  ### surfaces: no JUnit reports reach the report job, which exits non-zero on
+  ### "no tests observed". That same exit is what makes a failed artifact
+  ### download visible at all - it would otherwise finish the run green.
+  ###
+  ### `report` therefore acts as a broad backstop, but the upstream jobs are
+  ### listed explicitly anyway: the backstop depends on the download step and
+  ### the precondition staying as they are, and naming the jobs is what lets
+  ### this say WHICH one failed.
+  ###
+  ### `== failure` throughout, not `!= success`. A job skipped because an
+  ### upstream one failed must not alert - the failure itself already does - and
+  ### `!= success` would fire on every run once this workflow is gated to the
+  ### official repo, since every job is then skipped.
+  ############################################################################
+  notify:
+    name: "Slack: Workflow Errors"
+    needs:
+      - setup-env
+      - check-test-caches
+      - create-nextest-archive
+      - report
+    if: >-
+      always() && !cancelled() && (
+        needs.setup-env.result == 'failure' ||
+        needs.check-test-caches.result == 'failure' ||
+        needs.create-nextest-archive.result == 'failure' ||
+        needs.report.result == 'failure'
+      )
+    runs-on: ubuntu-latest
+    steps:
+      # Scheduled runs always notify; a manual dispatch only when asked, so
+      # testing the workflow does not page anyone. A fork has no webhook
+      # secret, so say so and stop rather than failing the job.
+      - name: Resolve whether to notify
+        id: resolve
+        env:
+          SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK_CI_NIGHTLY }}
+          EVENT_NAME: ${{ github.event_name }}
+          WANT_NOTIFY: ${{ inputs.slack-notify }}
+        run: |
+          if [[ "${EVENT_NAME}" == "schedule" ]]; then
+            notify="true"
+          else
+            notify="${WANT_NOTIFY:-false}"
+          fi
+
+          if [[ -z "${SLACK_WEBHOOK}" ]]; then
+            echo "::notice title=Slack disabled::SLACK_WEBHOOK_CI_NIGHTLY is not set"
+            notify="false"
+          fi
+
+          echo "notify=${notify}" >> "$GITHUB_OUTPUT"
+          echo "Slack notify: ${notify}"
+
+      - name: Post to Slack
+        if: steps.resolve.outputs.notify == 'true'
+        uses: slackapi/slack-github-action@e090a7a7c0b2d9b7ae32bd34f086e680ce260b06 # v3.0.0
+        with:
+          webhook: ${{ secrets.SLACK_WEBHOOK_CI_NIGHTLY }}
+          webhook-type: incoming-webhook
+          payload: |
+            {
+              "blocks": [
+                {
+                  "type": "header",
+                  "text": {
+                    "type": "plain_text",
+                    "text": ":warning: ${{ github.workflow }} — Workflow Error",
+                    "emoji": true
+                  }
+                },
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": "The workflow failed due to unexpected error or special conditions being met."
+                  }
+                },
+                {
+                  "type": "section",
+                  "fields": [
+                    {
+                      "type": "mrkdwn",
+                      "text": "*Workflow:*\n${{ github.workflow }}"
+                    },
+                    {
+                      "type": "mrkdwn",
+                      "text": "*Branch:*\n`${{ github.ref_name }}`"
+                    }
+                  ]
+                },
+                {
+                  "type": "actions",
+                  "elements": [
+                    {
+                      "type": "button",
+                      "text": {
+                        "type": "plain_text",
+                        "text": "View Run",
+                        "emoji": true
+                      },
+                      "url": "https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+                    }
+                  ]
+                }
+              ]
+            }
+
