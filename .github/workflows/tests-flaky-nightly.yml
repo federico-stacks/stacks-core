@@ -103,6 +103,40 @@ env:
 
 jobs:
   ############################################################################
+  ### CI Enablement Check
+  ###
+  ### Only the official repo runs this on a schedule. A fork that wants it can
+  ### set the ENABLE_CI_WORKFLOWS variable, and a manual dispatch always runs -
+  ### which is what makes the workflow testable on a fork without granting it
+  ### the nightly cron.
+  ###
+  ### Matches create-test-caches.yml, the closest analogue: also scheduled,
+  ### also dispatchable. Note ci.yml and check-clippy.yml use a two-clause
+  ### variant without the dispatch escape; that one would make every fork
+  ### dispatch a no-op.
+  ############################################################################
+  check-ci-enabled:
+    name: "Check: CI Enabled"
+    runs-on: ubuntu-latest
+    outputs:
+      enabled: ${{ steps.check.outputs.enabled }}
+    steps:
+      - id: check
+        run: |
+          echo "=== CI Enablement Check ==="
+          echo "ENABLE_CI_WORKFLOWS: '${{ vars.ENABLE_CI_WORKFLOWS }}'"
+          echo "github.repository:   '${{ github.repository }}'"
+          echo "github.event_name:   '${{ github.event_name }}'"
+
+          if [[ "${{ vars.ENABLE_CI_WORKFLOWS }}" == "true" || "${{ github.repository }}" == "stacks-network/stacks-core" || "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            echo "Result: CI is ENABLED"
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "Result: CI is DISABLED"
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  ############################################################################
   ### Global Variables Setup
   ###
   ### Bridges global env variables to the jobs context so they are safely
@@ -110,6 +144,9 @@ jobs:
   ############################################################################
   setup-env:
     name: "Setup: Global Variables"
+    needs:
+      - check-ci-enabled
+    if: needs.check-ci-enabled.outputs.enabled == 'true'
     runs-on: ubuntu-latest
     outputs:
       test-archive-file: ${{ steps.set-env.outputs.test_archive_file }}
@@ -152,6 +189,9 @@ jobs:
   ### manual dispatch) - no other workflow, including this one, saves them.
   ############################################################################
   check-test-caches:
+    needs:
+      - check-ci-enabled
+    if: needs.check-ci-enabled.outputs.enabled == 'true'
     name: "Check: Test Caches"
     uses: ./.github/workflows/_check-test-caches.yml
 
@@ -215,9 +255,18 @@ jobs:
   report:
     name: "Report: Failed Tests"
     # always(): the test jobs are expected to fail when a flaky test trips, and
-    # that failure is exactly what needs reporting.
-    if: always() && !cancelled()
+    # that failure is exactly what needs reporting. It also covers tests-bitcoin
+    # being *skipped* rather than failed - which is what happens when the
+    # archive job dies - so the run still gets a diagnostic instead of silently
+    # producing nothing.
+    #
+    # The enablement gate has to be repeated here for that same reason: with
+    # always(), skipping every upstream job would not stop this one, and it
+    # would then find no artifacts, exit non-zero and fire the Slack alert on a
+    # run that was never meant to happen.
+    if: always() && !cancelled() && needs.check-ci-enabled.outputs.enabled == 'true'
     needs:
+      - check-ci-enabled
       - tests-bitcoin
     runs-on: ubuntu-latest
     permissions:
@@ -319,12 +368,19 @@ jobs:
   notify:
     name: "Slack: Workflow Errors"
     needs:
+      - check-ci-enabled
       - setup-env
       - check-test-caches
       - create-nextest-archive
       - report
+    # Deliberately NOT gated on enabled == 'true'. When the workflow is disabled
+    # every job below reports `skipped`, which is not `failure`, so nothing
+    # fires - this is exactly the case that ruled out `!= success` earlier.
+    # Leaving the gate off instead lets a *failure* of check-ci-enabled itself be
+    # alerted on, which would otherwise skip the whole nightly in silence.
     if: >-
       always() && !cancelled() && (
+        needs.check-ci-enabled.result == 'failure' ||
         needs.setup-env.result == 'failure' ||
         needs.check-test-caches.result == 'failure' ||
         needs.create-nextest-archive.result == 'failure' ||
