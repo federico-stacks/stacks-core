@@ -1,114 +1,73 @@
 #!/usr/bin/env bash
 #
-# Reports the outcome of every test in a nightly flakiness run.
+# Reports the outcome of every test in a flakiness scan run.
 #
 # Reads the nextest JUnit reports produced by the test jobs and records what
-# happened to each test that ran. The nightly runs the `flaky-scan` profile with
+# happened to each test that ran. The workflow runs the `flaky-scan` profile with
 # `retries = 0`, so every failure here is a single-attempt failure against the
 # default branch - a flake candidate, not a retry artifact and not caused by a
 # pull request's changes.
 #
 # Required env vars:
 #   JUNIT_DIR           - Directory holding the downloaded junit_*.xml reports
-#
-# Optional env vars:
-#   OBSERVED_TESTS_FILE - JSONL, one object per test that ran, sorted by name:
+#   OBSERVED_TESTS_FILE - JSONL to write, one object per test that ran, sorted
+#                         by name:
 #                           {"name": ..., "status": "pass"|"fail",
 #                            "time": <seconds>, "excerpt": ...}
 #                         `excerpt` is empty for passing tests. Skipped tests are
 #                         omitted: they never reached a verdict.
-#                         (default: observed-tests.jsonl)
 #
 # Outputs:
 #   - the file above, read by the issue steps in this same job
 #   - a markdown summary appended to $GITHUB_STEP_SUMMARY when set
+##
+# Exit behavior:
+#   Exits 0 when report can be produced, whether or not any test failed.
 #
-# Not in scope: classifying failures by mode, normalising failure signatures,
-# tracking history across runs, and filing issues. Those are separate steps so
-# each can be reviewed on its own.
-#
-# Exit behaviour:
-#   Always exits 0 when the reports were readable. Test failures are reported by
-#   the test jobs themselves; failing here would only hide the summary.
+#   Exits 1 when a precondition is missing, or when the reports cannot be parsed. This
+#   is a failure of the scan itself, not of any test.
 
 set -euo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 ## Load logging functions
-# shellcheck disable=SC1091
 source "${script_dir}/logging.sh"
-
-## --- Configuration ----------------------------------------------------------
-junit_dir="${JUNIT_DIR:-}"
-observed_tests_file="${OBSERVED_TESTS_FILE:-observed-tests.jsonl}"
-
-# Enough of the output to recognise the failure, without pasting a whole
-# backtrace into an issue body later. Read by excerpt() below.
-excerpt_lines=10
-
-## ── Check for required binaries ─────────────────────────────────────────────
-missing=0
-for cmd in awk find grep jq sort xmllint; do
-    if ! command -v "${cmd}" > /dev/null 2>&1; then
-        error "Missing required command: $(hl "${cmd}")"
-        missing=1
-    fi
-done
-if [[ "${missing}" -eq 1 ]]; then
-    error "xmllint comes from the $(hl "libxml2-utils") package"
-    exit 1
-fi
-
-## ── Validate required inputs ────────────────────────────────────────────────
-if [[ -z "${junit_dir}" ]]; then
-    error "JUNIT_DIR is not set"
-    exit 1
-fi
 
 ## ── Main ────────────────────────────────────────────────────────────────────
 main() {
+    initialize
+
     local -a reports
     local report_count report observed_count failed_count
-    local failed_names skipped_names name status duration failure_text excerpt_text record
+    local failed_names name status duration failure_text excerpt_text record
 
     ## Collect the reports
-    mapfile -t reports < <(find "${junit_dir}" -type f -name '*.xml' 2> /dev/null | sort)
+    mapfile -t reports < <(find "${CFG_JUNIT_DIR}" -type f -name '*.xml' 2> /dev/null | sort)
     report_count="${#reports[@]}"
 
-    : > "${observed_tests_file}"
+    : > "${CFG_OBSERVED_TESTS_FILE}"
 
     # A run that produced no reports failed before the tests executed. That is a
     # very different thing from "no test failed", so never let it read as success.
     if [[ "${report_count}" -eq 0 ]]; then
-        warn "No JUnit reports found under $(hl "${junit_dir}")"
-        summary "## Nightly flakiness run"
+        warn "No JUnit reports found under $(hl "${CFG_JUNIT_DIR}")"
+        summary "## Flaky test scan"
         summary ""
-        summary "**No test results were parsed.** The run failed before the tests"
-        summary "executed - check the archive and test jobs. This is not the same as"
-        summary "a run in which no test failed."
+        summary "**No test results were parsed.** Check the archive and test jobs."
         summary ""
         return 0
     fi
 
-    info "Parsing $(hl "${report_count}") JUnit report(s) from $(hl "${junit_dir}")..."
+    info "Parsing $(hl "${report_count}") JUnit report(s) from $(hl "${CFG_JUNIT_DIR}")..."
 
     ## Record every test that ran
     for report in "${reports[@]}"; do
-        # Categorise once per report rather than querying per test
+        # Gather failed tests names per report
         failed_names=$(test_names "${report}" '//testcase[failure or error]/@name')
-        skipped_names=$(test_names "${report}" '//testcase[skipped]/@name')
 
         while read -r name; do
             [[ -z "${name}" ]] && continue
-
-            # A skipped test never reached a verdict, so it is not "observed".
-            # nextest does not currently emit these - the "N skipped" in its
-            # terminal output is filter-excluded tests, which never appear in the
-            # report at all - but exclude them in case that changes.
-            if grep -qxF "${name}" <<< "${skipped_names}"; then
-                continue
-            fi
 
             # Fetch values by name rather than by position, so they cannot be
             # mismatched across separate queries. Rust test names contain no
@@ -118,9 +77,7 @@ main() {
 
             if grep -qxF "${name}" <<< "${failed_names}"; then
                 status="fail"
-                # string() gives the element's decoded string value. text() would
-                # return a node-set that xmllint re-serializes, leaving &lt; and
-                # friends escaped in the output.
+                # string() gives the element's decoded string value. 
                 failure_text=$(xpath "string(//testcase[@name='${name}']/*[self::failure or self::error])" "${report}")
 
                 # nextest repeats the first line of the body in @message, so prefer
@@ -141,23 +98,21 @@ main() {
                 --arg excerpt "${excerpt_text}" \
                 --argjson time "${duration:-0}" \
                 '{name: $name, status: $status, time: $time, excerpt: $excerpt}' \
-                >> "${observed_tests_file}"
+                >> "${CFG_OBSERVED_TESTS_FILE}"
         done < <(test_names "${report}" '//testcase/@name')
     done
 
-    # Sorted by test name: stable between runs, so two runs' outputs diff cleanly,
-    # and tests from the same module group together - three failures under one
-    # module often share a single root cause.
-    if [[ -s "${observed_tests_file}" ]]; then
-        jq -s -c 'sort_by(.name)[]' "${observed_tests_file}" > "${observed_tests_file}.sorted"
-        mv "${observed_tests_file}.sorted" "${observed_tests_file}"
+    # Sort by test name
+    if [[ -s "${CFG_OBSERVED_TESTS_FILE}" ]]; then
+        jq -s -c 'sort_by(.name)[]' "${CFG_OBSERVED_TESTS_FILE}" > "${CFG_OBSERVED_TESTS_FILE}.sorted"
+        mv "${CFG_OBSERVED_TESTS_FILE}.sorted" "${CFG_OBSERVED_TESTS_FILE}"
     fi
 
-    observed_count=$(grep -c '' "${observed_tests_file}" || true)
-    failed_count=$(jq -s '[.[] | select(.status == "fail")] | length' "${observed_tests_file}")
+    observed_count=$(grep -c '' "${CFG_OBSERVED_TESTS_FILE}" || true)
+    failed_count=$(jq -s '[.[] | select(.status == "fail")] | length' "${CFG_OBSERVED_TESTS_FILE}")
 
     ## Report
-    summary "## Nightly flakiness run"
+    summary "## Flaky test scan"
     summary ""
     summary "| | |"
     summary "| --- | --- |"
@@ -174,45 +129,81 @@ main() {
         summary ""
         summary "| Test | Duration |"
         summary "| --- | --- |"
-        # jq joins the fields with tabs and `read` splits them apart again. This
-        # is safe because @tsv escapes any tab, newline, CR or backslash *inside*
-        # a value as a two-character sequence, so a record is always one line
-        # carrying exactly the field count jq emitted - no value can mis-split
-        # the row. The trade-off is that a multi-line value would arrive with a
-        # literal `\n` in it, so records holding one are read as JSON instead
-        # (see the raw-results block below).
         while IFS=$'\t' read -r name duration; do
             summary "| \`${name}\` | ${duration}s |"
-        done < <(jq -r 'select(.status == "fail") | [.name, .time] | @tsv' "${observed_tests_file}")
-        summary ""
-        summary "Retries are disabled on this profile, so each of these failed on a"
-        summary "single attempt against the default branch."
+        done < <(jq -r 'select(.status == "fail") | [.name, .time] | @tsv' "${CFG_OBSERVED_TESTS_FILE}")
         summary ""
 
         # The failing records, collapsed so they do not dominate the summary.
         # Filtered to failures: printing every observed test would be hundreds of
         # lines on a full-width run.
         summary "<details>"
-        summary "<summary>Raw results for failures (<code>${observed_tests_file}</code>)</summary>"
+        summary "<summary>Raw results for failures (<code>${CFG_OBSERVED_TESTS_FILE}</code>)</summary>"
         summary ""
         summary '```json'
         while IFS= read -r record; do
             summary "${record}"
-        done < <(jq -c 'select(.status == "fail")' "${observed_tests_file}")
+        done < <(jq -c 'select(.status == "fail")' "${CFG_OBSERVED_TESTS_FILE}")
         summary '```'
         summary ""
         summary "</details>"
         summary ""
     fi
 
-    info "Wrote $(hl "${observed_count}") observed test(s), $(hl "${failed_count}") failing, to $(hl "${observed_tests_file}")"
+    info "Wrote $(hl "${observed_count}") observed test(s), $(hl "${failed_count}") failing, to $(hl "${CFG_OBSERVED_TESTS_FILE}")"
 }
 
 ## ── Helpers ─────────────────────────────────────────────────────────────────
-#
-# Defined after main() on purpose: bash resolves function names when they are
-# called, not when the file is parsed, so main() can read top-down while the
-# helpers it uses sit out of the way below.
+
+# Initialize the script, checking preconditions and loading configuration. 
+# Exits on failure.
+initialize() {
+    ## Preconditions: tools
+    local missing_cmds=() cmd
+    for cmd in awk find grep jq sort xmllint; do
+        command -v "${cmd}" > /dev/null 2>&1 || missing_cmds+=("${cmd}")
+    done
+    if (( ${#missing_cmds[@]} > 0 )); then
+        error "Missing required command(s): $(hl "${missing_cmds[*]}")"
+        # Named only when it is the one missing: it is the only non-obvious package.
+        if [[ " ${missing_cmds[*]} " == *" xmllint "* ]]; then
+            error "xmllint comes from the $(hl "libxml2-utils") package"
+        fi
+        exit 1
+    fi
+
+    ## Preconditions: inputs
+    # Checked before binding, so the bindings below can be plain expansions.
+    require_vars "the caller" \
+        JUNIT_DIR \
+        OBSERVED_TESTS_FILE
+
+    ## Configuration
+    CFG_JUNIT_DIR="${JUNIT_DIR}"
+    CFG_OBSERVED_TESTS_FILE="${OBSERVED_TESTS_FILE}"
+
+    # Enough of the output to recognise the failure, without pasting a whole
+    # backtrace into an issue body later. Read by excerpt() below.
+    CFG_EXCERPT_LINES=10
+}
+
+# Exit unless every named variable is set and non-empty. Reports all the misses
+# at once, since a broken env block tends to drop several. `provider` names who
+# should have supplied them, which is what tells the reader where to look.
+require_vars() {
+    local provider="$1"
+    shift
+    local missing=() var
+
+    for var in "$@"; do
+        [[ -n "${!var:-}" ]] || missing+=("${var}")
+    done
+
+    if (( ${#missing[@]} > 0 )); then
+        error "Not provided by ${provider}: $(hl "${missing[*]}")"
+        exit 1
+    fi
+}
 
 # Run an XPath query, treating "no match" as empty rather than an error.
 # xmllint exits non-zero and prints "XPath set is empty" when nothing matches.
@@ -232,8 +223,7 @@ test_names() {
 
 # The part of the captured output that says why the test failed. Prefers the
 # panic line and what follows; otherwise keeps the tail, which is where nextest
-# prints the reason. No interpretation of the content - identifying the *kind*
-# of failure is a later step.
+# prints the reason.
 excerpt() {
     local text="$1"
 
@@ -248,9 +238,9 @@ excerpt() {
     fi
 
     if grep -qi 'panicked at' <<< "${text}"; then
-        grep -i -A"$(( excerpt_lines - 1 ))" 'panicked at' <<< "${text}" \
+        grep -i -A"$(( CFG_EXCERPT_LINES - 1 ))" 'panicked at' <<< "${text}" \
             | sed '/[Ss]tack backtrace:/Q' \
-            | head -n "${excerpt_lines}"
+            | head -n "${CFG_EXCERPT_LINES}"
     else
         grep -v '^[[:space:]]*$' <<< "${text}" | tail -n 15
     # A trailing `|| true` because this helper is best-effort by design: no
@@ -258,9 +248,7 @@ excerpt() {
     fi | sed 's/[[:space:]]*$//' || true
 }
 
-# Append a line to the job summary, and echo it so the log shows the report
-# too. printf rather than echo: the raw results block above contains JSON with
-# backslash escapes, which some echo implementations would interpret.
+# Append a line to the job summary, and echo it so the log shows the report too
 summary() {
     printf '%s\n' "$*"
     if [[ -n "${GITHUB_STEP_SUMMARY:-}" ]]; then
@@ -269,8 +257,8 @@ summary() {
 }
 
 ## ── Entry point ─────────────────────────────────────────────────────────────
-# Guarded so a test harness can source this file and exercise the helpers above
-# in isolation without running the whole report.
+# Guarded so a this file can be sourced and exercise the helpers above
+# in isolation without running the whole thing.
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
     main "$@"
 fi

@@ -26,7 +26,7 @@ path = "../../../junit.xml"
 #
 # Integration test output with RUST_BACKTRACE=full reaches tens of megabytes
 # per test. Every failing test uploads its report as an artifact, which the
-# nightly's report job then downloads and parses, so the size is paid three
+# scan's report job then downloads and parses, so the size is paid three
 # times over for output nothing reads.
 #
 # What survives is nextest's own verdict in the `message` attribute: the panic
@@ -53,7 +53,7 @@ inherits = "ci"
 # Options: A positive integer (e.g., 4), "num-cpus", or a negative integer (e.g., -1)
 test-threads = "num-cpus"
 
-# Profile for the nightly flakiness scan (`tests-flaky-scan-nightly.yml`).
+# Profile for the flakiness scan workflow (`tests-flaky-scan-nightly.yml`).
 #
 # This scan exists to *measure* flakiness, so it deliberately diverges from
 # the `ci` profile. Do not "fix" these settings to match `ci`.
@@ -66,5 +66,5 @@ inherits = "ci"
 retries = 0
 # One failing test must never suppress results for the rest of its partition.
 fail-fast = false
-# Nightly runs one test per job, same as `ci-sequential`.
+# The scan runs one test per job, same as `ci-sequential`.
 test-threads = 1

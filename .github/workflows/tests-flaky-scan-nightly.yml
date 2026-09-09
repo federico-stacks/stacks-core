@@ -1,22 +1,36 @@
-# Nightly flakiness hunt over the Bitcoin integration tests.
+# Find flaky tests in the Bitcoin integration suite, and keep one GitHub issue
+# per flaky test in step with what each run observed.
 #
-# Step 1: run the existing Bitcoin test workflow on a schedule with retries
-# disabled, and keep the JUnit reports. Nothing is reported anywhere yet.
+# Runs the same suite as PR CI through `_tests-bitcoin.yml`, but on the
+# `flaky-scan` nextest profile, whose only real difference is `retries = 0`
+#  to gather flaky tests failure. 
 #
-# Why retries are disabled:
-#   PR CI runs the `ci` nextest profile with `retries = 2`, so a test that fails
-#   and then passes reports green. Those fail-then-pass flakes are the majority
-#   of what this workflow exists to find - at a 30% per-attempt failure rate a
-#   test survives three attempts ~97% of the time. The `flaky-scan` profile sets
-#   `retries = 0` so a single attempt per test is the datapoint.
+# Triggers:
+#   schedule  - 0200 UTC daily, on the default branch. CURRENTLY DISABLED -
+#               see the commented block below
+#   dispatch  - manual, on any branch, with the inputs below.
 #
-# Why nightly, and not on pull requests:
-#   A failure here cannot be blamed on a pull request's changes, which removes
-#   the main confound when attributing a failure to the test itself.
+# Jobs:
+#   check-ci-enabled        gate - the official repo, ENABLE_CI_WORKFLOWS, or a
+#                           manual dispatch. Everything else skips without it
+#   setup-env               bridges workflow env into the jobs context, which a
+#                           reusable workflow's `with:` block cannot read
+#   check-test-caches       fails fast if the bitcoin/cargo caches are missing
+#   create-nextest-archive  builds the test archive once, shared by every test
+#   tests-bitcoin           the suite, one job per test
+#   report                  parses the JUnit reports and files the issues
+#   notify                  Slack, on harness failure only
 #
-# The test set, partitioning and exclusions are exactly those PR CI uses: this
-# workflow only swaps the nextest profile.
-
+# What `report` does, in order (see the two scripts for detail):
+#   1. flaky_report.sh  - reads every junit_*.xml into observed-tests.jsonl,
+#                         one record per test with its status and failure excerpt
+#   2. flaky_issues.sh  - files or comments on an issue for each failed test,
+#                         closes issues whose test has gone quiet or vanished,
+#                         and refuses to act at all on a run that looks broken
+#
+# This workflow is red on most runs by design: failing tests are its output, not
+# an error. So the Slack alert deliberately ignores `tests-bitcoin` and fires
+# only when the harness itself breaks - see the `notify` job for the reasoning.
 name: "Tests: Flaky Scan Nightly"
 run-name: "Tests: Flaky Scan Nightly [${{ github.ref_name }}]"
 
@@ -91,9 +105,7 @@ env:
   # Do NOT name this NEXTEST_PROFILE: that variable is read by cargo-nextest
   # itself, and workflow-level env reaches every job. The archive build runs
   # `cargo nextest archive` without --config-file, so it would try to resolve
-  # this profile against the built-in set and fail with
-  # "profile `flaky-scan` not found (known profiles: default, default-miri)"
-  # after having already spent several minutes compiling.
+  # this profile against the built-in set and fail
   WF_NEXTEST_PROFILE: "flaky-scan"
 
 jobs:
@@ -101,14 +113,10 @@ jobs:
   ### CI Enablement Check
   ###
   ### Only the official repo runs this on a schedule. A fork that wants it can
-  ### set the ENABLE_CI_WORKFLOWS variable, and a manual dispatch always runs -
+  ### set the ENABLE_CI_WORKFLOWS variable, and a manual dispatch always runs,
   ### which is what makes the workflow testable on a fork without granting it
   ### the nightly cron.
   ###
-  ### Matches create-test-caches.yml, the closest analogue: also scheduled,
-  ### also dispatchable. Note ci.yml and check-clippy.yml use a two-clause
-  ### variant without the dispatch escape; that one would make every fork
-  ### dispatch a no-op.
   ############################################################################
   check-ci-enabled:
     name: "Check: CI Enabled"
@@ -175,14 +183,10 @@ jobs:
   ############################################################################
   ### Check Reusable Test Caches
   ###
-  ### Both the archive build and the test jobs restore caches with
-  ### `fail-on-cache-miss: true`, so a missing cache otherwise surfaces as an
-  ### opaque restore failure partway through the run. This job checks both up
-  ### front and fails with a summary table naming the missing cache and a link
-  ### to create-test-caches.yml.
+  ### Check test cashes existence
   ###
   ### Caches are only ever created by create-test-caches.yml (push to `main`, or
-  ### manual dispatch) - no other workflow, including this one, saves them.
+  ### manual dispatch).
   ############################################################################
   check-test-caches:
     needs:
@@ -221,8 +225,7 @@ jobs:
   ### Run Bitcoin Tests
   ###
   ### Same test set, exclusions and partitioning as PR CI. Only the nextest
-  ### profile differs. Code coverage is skipped: this run measures flakiness,
-  ### and PR CI already produces the coverage report.
+  ### profile differs. Code coverage is skipped.
   ############################################################################
   tests-bitcoin:
     name: "Tests: Bitcoin"
@@ -241,25 +244,12 @@ jobs:
   ############################################################################
   ### Report Failed Tests
   ###
-  ### Runs in the same workflow run as the tests, so it reads the JUnit reports
-  ### minutes after they are written - the artifacts' 1 day retention does not
-  ### matter here and no external store is needed.
-  ###
-  ### Answers only "which tests failed?". Classifying failures and filing
-  ### issues are separate steps.
+  ### Gather JUnit test reports info, looking for failed tests.
   ############################################################################
   report:
     name: "Report: Failed Tests"
     # always(): the test jobs are expected to fail when a flaky test trips, and
-    # that failure is exactly what needs reporting. It also covers tests-bitcoin
-    # being *skipped* rather than failed - which is what happens when the
-    # archive job dies - so the run still gets a diagnostic instead of silently
-    # producing nothing.
-    #
-    # The enablement gate has to be repeated here for that same reason: with
-    # always(), skipping every upstream job would not stop this one, and it
-    # would then find no artifacts, exit non-zero and fire the Slack alert on a
-    # run that was never meant to happen.
+    # that failure is exactly what needs reporting.
     if: always() && !cancelled() && needs.check-ci-enabled.outputs.enabled == 'true'
     needs:
       - check-ci-enabled
@@ -290,21 +280,7 @@ jobs:
 
       # Download the nextest JUnit reports produced by the test jobs
       #   - pattern is narrowed to the per-test reports on purpose. `nextest-*`
-      #     also matches `nextest-archive`, which is ~580 MB of test archive
-      #     plus debug binaries: it would be downloaded and unpacked every run
-      #     only to be ignored, since it contains no .xml. The bitcoin suite
-      #     names its reports nextest-isolated-test-<index>; another suite added
-      #     here later would need its own naming included.
-      #   - allowed to fail the job. download-artifact hard-errors when the
-      #     pattern matches nothing, and that is the clearest possible report of
-      #     "there were no results": the step's own name says which stage broke.
-      #     It used to carry continue-on-error so the report script could
-      #     explain the situation in the job summary instead, but that summary
-      #     tells the reader to check the archive and test jobs - actively wrong
-      #     advice when it was the fetch that failed, and the run finished green
-      #     besides. Both are fixed at the source now, and failing here also
-      #     stops a partial fetch from being triaged as though whole partitions'
-      #     tests had vanished.
+      #     also matches `nextest-archive`, which is no needed.
       - name: Download nextest JUnit artifacts
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
         with:
@@ -318,20 +294,16 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libxml2-utils
 
-      # Parse the reports into a job summary plus files for later steps
+      # Parse the reports into a job summary and produce JSONL with
+      # the failed tests
       - name: Report Failed Tests
         run: |
           bash ./.github/scripts/flaky_report.sh
 
-      # File or comment on one issue per failing test
-      #   - runs after the report, reading the JSONL it produced from the
-      #     working directory, so no artifact is needed to pass data along
+      # Run on the failed tests JSONL and manage Github issues lifecycle.
       - name: File Flaky Test Issues
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # actions: read is not needed - `gh run list` on a public repo works
-          # with the default token's contents scope
-          NIGHTLY_WORKFLOW: tests-flaky-scan-nightly.yml
         run: |
           bash ./.github/scripts/flaky_issues.sh
 
@@ -343,23 +315,7 @@ jobs:
   ### This workflow is red almost every night by design: failing tests are its
   ### expected output. Alerting on that would train everyone to mute the
   ### channel, and the real breakages would then be invisible too. So
-  ### `tests-bitcoin` is deliberately absent from the condition below - its
-  ### result is `failure` whenever any test fails, and carries no information.
-  ###
-  ### Omitting it costs nothing, because a harness failure inside it still
-  ### surfaces: no JUnit reports reach the report job, which exits non-zero on
-  ### "no tests observed". That same exit is what makes a failed artifact
-  ### download visible at all - it would otherwise finish the run green.
-  ###
-  ### `report` therefore acts as a broad backstop, but the upstream jobs are
-  ### listed explicitly anyway: the backstop depends on the download step and
-  ### the precondition staying as they are, and naming the jobs is what lets
-  ### this say WHICH one failed.
-  ###
-  ### `== failure` throughout, not `!= success`. A job skipped because an
-  ### upstream one failed must not alert - the failure itself already does - and
-  ### `!= success` would fire on every run once this workflow is gated to the
-  ### official repo, since every job is then skipped.
+  ### test failures are deliberately absent from the notify condition.
   ############################################################################
   notify:
     name: "Slack: Workflow Errors"
@@ -373,7 +329,7 @@ jobs:
     # every job below reports `skipped`, which is not `failure`, so nothing
     # fires - this is exactly the case that ruled out `!= success` earlier.
     # Leaving the gate off instead lets a *failure* of check-ci-enabled itself be
-    # alerted on, which would otherwise skip the whole nightly in silence.
+    # alerted on, which would otherwise skip the whole run in silence.
     if: >-
       always() && !cancelled() && (
         needs.check-ci-enabled.result == 'failure' ||
@@ -384,9 +340,8 @@ jobs:
       )
     runs-on: ubuntu-latest
     steps:
-      # Scheduled runs always notify; a manual dispatch only when asked, so
-      # testing the workflow does not page anyone. A fork has no webhook
-      # secret, so say so and stop rather than failing the job.
+      # Scheduled runs always notify; a manual dispatch only when asked. 
+      # A fork has no webhook secret, so say so and stop rather than failing the job.
       - name: Resolve whether to notify
         id: resolve
         env:
