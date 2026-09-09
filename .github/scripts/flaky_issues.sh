@@ -63,56 +63,55 @@
 #   Exits 1 when triage was REFUSED: no results were observed, or the run failed
 #   so many tests that it cannot be trusted. Both cases mean no issue was filed,
 #   commented on or closed.
+#
+#   Exits non-zero if any GitHub write fails, at the point of failure. Triage is
+#   then partially applied and no summary is written, so the job log is the only
+#   record - deliberate, since a failed write is the harness breaking, not a test
+#   failing, and the next run re-files anything it missed.
 
 set -euo pipefail
 
-script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/logging.sh"
 
-source "${script_dir}/logging.sh"
-
-# Script entry point
 main() {
     initialize
 
-    local existing_issues observed_count failed_count
-    local created=0 updated=0 reopened=0 closed=0 orphaned=0
-    local run_looks_broken="false"
-    
+    local existing_issues
+    local -A tests_stats=([observed]=0 [failed]=0)
+    local -A issues_stats=(
+        [created]=0 [updated]=0 [reopened]=0 [closed]=0 [orphaned]=0
+    )
+    local -a issues_actions=()
+
     # Precondition: this run must have observed something
     if [[ ! -s "${CFG_OBSERVED_TESTS_FILE}" ]]; then
         warn "No tests were observed in this run - nothing to do"
-        summary "## Flaky test issues"
-        summary ""
-        summary "**No test results were observed**, so no issue was filed, updated or closed."
-        summary "This is not the same as a run in which no test failed - check the archive"
-        summary "and test jobs."
-        summary ""
-        return 1
+        report_summary_no_observations
+        exit 1
     fi
 
-    observed_count=$(grep -c '' "${CFG_OBSERVED_TESTS_FILE}" || true)
-    failed_count=$(jq -s '[.[] | select(.status == "fail")] | length' "${CFG_OBSERVED_TESTS_FILE}")
-    info "Observed $(hl "${observed_count}") test(s), $(hl "${failed_count}") failing, on $(hl "${CFG_REPO}")"
+    tests_stats[observed]=$(grep -c '' "${CFG_OBSERVED_TESTS_FILE}" || true)
+    tests_stats[failed]=$(jq -s '[.[] | select(.status == "fail")] | length' "${CFG_OBSERVED_TESTS_FILE}")
+    info "Observed $(hl "${tests_stats[observed]}") test(s), $(hl "${tests_stats[failed]}") failing, on $(hl "${CFG_REPO}")"
 
     # Mass-failure guard: is this a flaky run, or a broken one?
-    if (( failed_count > CFG_MAX_FLAKY_FAILURES )); then
-        run_looks_broken="true"
-        warn "$(hl "${failed_count}") failures, more than $(hl "MAX_FLAKY_FAILURES")=$(hl "${CFG_MAX_FLAKY_FAILURES}")"
+    if (( tests_stats[failed] > CFG_MAX_FLAKY_FAILURES )); then
+        warn "$(hl "${tests_stats[failed]}") failures, more than $(hl "MAX_FLAKY_FAILURES")=$(hl "${CFG_MAX_FLAKY_FAILURES}")"
         warn "Treating this run as broken: nothing will be filed, commented on, or closed"
-        report_summary
-        return 1
+        report_summary_broken tests_stats
+        exit 1
     fi
 
     # Manage Github issue lifecycle
     existing_issues="$(mktemp)"
     load_existing_issues "${existing_issues}"
     ## Phase 1: create, update, or reopen issues for tests that failed in this run
-    file_failure_issues "${existing_issues}"
+    file_failure_issues "${existing_issues}" issues_stats issues_actions
     ## Phase 2: close issues for tests that have gone quiet or orphaned
-    close_quiet_issues "${existing_issues}"
+    close_quiet_issues "${existing_issues}" issues_stats issues_actions
     rm -f "${existing_issues}"
 
-    report_summary
+    report_summary_success tests_stats issues_stats issues_actions
 }
 
 ## ── Helpers ─────────────────────────────────────────────────────────────────
@@ -224,8 +223,10 @@ load_existing_issues() {
 # Create, update, or reopen issues for tests that failed in this run
 file_failure_issues() {
     local existing_issues="$1"
+    local -n issues_stats_ref="$2"
+    local -n issues_actions_ref="$3"
     local record name duration excerpt marker comment_file body_file
-    local match number state url
+    local match number state url action
 
     while IFS= read -r record; do
         name=$(jq -r '.name' <<< "${record}")
@@ -279,7 +280,7 @@ file_failure_issues() {
             url=$(gh_mutate issue create --repo "${CFG_REPO}" \
                 --title "[Flaky Test] ${name}" \
                 --label "${CFG_FLAKY_LABEL}" \
-                --body-file "${body_file}" || true)
+                --body-file "${body_file}")
             rm -f "${body_file}"
 
             # Post the first evidence as a comment too, so a new issue and an old
@@ -291,18 +292,31 @@ file_failure_issues() {
             elif [[ "${CFG_DRY_RUN_ISSUES}" == "true" ]]; then
                 info "DRY-RUN: gh issue comment <new issue> --repo ${CFG_REPO} --body-file <evidence>"
             fi
-            created=$(( created + 1 ))
+            issues_stats_ref[created]=$(( issues_stats_ref[created] + 1 ))
+
+            if [[ -n "${number}" ]]; then
+                issues_actions_ref+=("${name}"$'\t'"#${number}"$'\t'"created")
+            elif [[ "${CFG_DRY_RUN_ISSUES}" == "true" ]]; then
+                issues_actions_ref+=("${name}"$'\t'"#XYZ"$'\t'"would create")
+            fi
         else
+            # Counters stay disjoint: a reopen counts as reopened, not also as
+            # updated, so their sum matches the number of rows in the table.
+            action="updated"
             if [[ "${state}" == "CLOSED" ]]; then
                 info "Reopening #${number} for $(hl "${name}")"
                 gh_mutate issue reopen "${number}" --repo "${CFG_REPO}"
-                reopened=$(( reopened + 1 ))
+                issues_stats_ref[reopened]=$(( issues_stats_ref[reopened] + 1 ))
+                action="reopened"
             fi
 
             info "Adding evidence to #${number} for $(hl "${name}")"
             gh_mutate issue comment "${number}" --repo "${CFG_REPO}" \
                 --body-file "${comment_file}"
-            updated=$(( updated + 1 ))
+            [[ "${action}" == "updated" ]] \
+                && issues_stats_ref[updated]=$(( issues_stats_ref[updated] + 1 ))
+
+            issues_actions_ref+=("${name}"$'\t'"#${number}"$'\t'"${action}")
         fi
 
         rm -f "${comment_file}"
@@ -317,9 +331,11 @@ file_failure_issues() {
 #   absent + quiet_count >= ORPHAN_AFTER  -> "not watched" (negative evidence)
 close_quiet_issues() {
     local existing_issues="$1"
+    local -n issues_stats_ref="$2"
+    local -n issues_actions_ref="$3"
     local quiet_runs number state test_id test_status last_failure quiet_count
     local manual_label
-    local comment reason
+    local comment reason action
     local -A observed_status=()
 
     # Status of every test that ran, so "passed" is distinguishable from "did
@@ -385,12 +401,16 @@ close_quiet_issues() {
         if [[ "${reason}" == "quiet" ]]; then
             comment="$(quiet_comment "${quiet_count}" "${last_failure}")"
             info "Closing #${number} for $(hl "${test_id}") after $(hl "${quiet_count}") quiet run(s)"
-            closed=$(( closed + 1 ))
+            issues_stats_ref[closed]=$(( issues_stats_ref[closed] + 1 ))
+            action="closed — quiet for ${quiet_count} runs"
         else
             comment="$(orphan_comment "${quiet_count}" "${last_failure}")"
             info "Closing #${number} for $(hl "${test_id}") - unobserved for $(hl "${quiet_count}") run(s)"
-            orphaned=$(( orphaned + 1 ))
+            issues_stats_ref[orphaned]=$(( issues_stats_ref[orphaned] + 1 ))
+            action="closed — unobserved for ${quiet_count} runs"
         fi
+
+        issues_actions_ref+=("${test_id}"$'\t'"#${number}"$'\t'"${action}")
 
         gh_mutate issue close "${number}" --repo "${CFG_REPO}" --comment "${comment}"
     done < <(jq -r --arg prefix "${CFG_ID_MARKER_PREFIX}" --arg heading "${CFG_FAILURE_HEADING}" '
@@ -461,44 +481,67 @@ require_vars() {
     fi
 }
 
-# Build the job summary from the counters main() and the phases maintained.
-report_summary() {
+# The no-observations summary: the run did not observe any tests.
+report_summary_no_observations() {
     summary "## Flaky test issues"
     summary ""
-    if [[ "${run_looks_broken}" == "true" ]]; then
-        # Never let a suppressed run read as a quiet one
-        summary "### This run looks broken, not flaky"
-        summary ""
-        summary "${failed_count} of ${observed_count} observed tests failed, more than the"
-        summary "\`MAX_FLAKY_FAILURES\` of ${CFG_MAX_FLAKY_FAILURES}. A failure count that high"
-        summary "usually means the run itself broke - a cache miss, a toolchain break, a corrupt"
-        summary "archive - rather than that ${failed_count} tests are independently flaky."
-        summary ""
-        summary "**No issue was filed, commented on, closed or reopened.**"
-        summary "Recording these failures would reset every affected issue's last-failure date and"
-        summary "delay its closure by the whole quiet window. The failing tests are listed in the"
-        summary "report above, and in the run's JSONL artifact."
-        summary ""
-        summary "If the failures turn out to be unrelated to each other, this threshold is too low."
-        summary ""
-    fi
+    summary "**No test results were observed**, so no issue was filed, updated or closed."
+    summary "This is not the same as a run in which no test failed - check the archive"
+    summary "and test jobs."
+}
+
+# The broken-run refusal summary: the run failed too many tests to be trusted.
+report_summary_broken() {
+    # Passed by name, following set_resolved_tag() in docker_bitcoin_majors.sh.
+    # The suffix matters: a nameref whose own name equals its target is a
+    # circular reference and fails at runtime.
+    local -n tests_stats_ref="$1"
+
+    summary "## Flaky test issues"
+    summary ""
+    summary "### This run looks broken, not flaky"
+    summary ""
+    summary "${tests_stats_ref[failed]} of ${tests_stats_ref[observed]} observed tests failed, more than the"
+    summary "\`MAX_FLAKY_FAILURES\` of ${CFG_MAX_FLAKY_FAILURES}. A failure count that high"
+    summary "usually means the run itself broke rather than that tests are independently flaky."
+    summary "No issue was filed, updated or closed."
+}
+
+# The normal summary: one line of totals, then a row per issue the run touched.
+report_summary_success() {
+    local -n tests_stats_ref="$1"
+    local -n issues_stats_ref="$2"
+    local -n issues_actions_ref="$3"
+    local row_name row_issue row_action
+
+    summary "## Flaky test issues"
+    summary ""
     if [[ "${CFG_DRY_RUN_ISSUES}" == "true" ]]; then
         summary "\`DRY_RUN_ISSUES\` was set: no issue was created, updated or closed."
         summary ""
     fi
-    summary "| | |"
-    summary "| --- | --- |"
-    summary "| Tests observed | ${observed_count} |"
-    summary "| Failing tests | ${failed_count} |"
-    summary "| Issues created | ${created} |"
-    summary "| Issues updated | ${updated} |"
-    summary "| Issues reopened | ${reopened} |"
-    summary "| Issues closed as quiet | ${closed} |"
-    summary "| Issues closed as no longer watched | ${orphaned} |"
+    summary "**${tests_stats_ref[failed]} failing of ${tests_stats_ref[observed]} observed** — ${issues_stats_ref[created]} created, \
+${issues_stats_ref[updated]} updated, ${issues_stats_ref[reopened]} reopened, ${issues_stats_ref[closed]} closed quiet, ${issues_stats_ref[orphaned]} closed unwatched"
     summary ""
 
-    info "Done: $(hl "${created}") created, $(hl "${updated}") updated, $(hl "${reopened}") reopened, $(hl "${closed}") closed, $(hl "${orphaned}") orphaned"
+    # The five counters are disjoint, so they sum to the row count below.
+    if (( ${#issues_actions_ref[@]} > 0 )); then
+        summary "| Test | Issue | Action |"
+        summary "| --- | --- | --- |"
+        # Sorted by test name so one test can be found without reading every row
+        while IFS=$'\t' read -r row_name row_issue row_action; do
+            summary "| \`${row_name}\` | ${row_issue} | ${row_action} |"
+        done < <(printf '%s\n' "${issues_actions_ref[@]}" | sort -t$'\t' -k1,1)
+        summary ""
+    else
+        # An empty table reads as broken, so say it plainly
+        summary "No issue needed creating, updating or closing."
+        summary ""
+    fi
+
+    info "Done: $(hl "${issues_stats_ref[created]}") created, $(hl "${issues_stats_ref[updated]}") updated, $(hl "${issues_stats_ref[reopened]}") reopened, $(hl "${issues_stats_ref[closed]}") closed, $(hl "${issues_stats_ref[orphaned]}") orphaned"
 }
+
 
 # Append a line to the job summary, and echo it so the log shows the report too
 summary() {
