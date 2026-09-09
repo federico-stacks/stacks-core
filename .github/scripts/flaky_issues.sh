@@ -229,7 +229,7 @@ file_failure_issues() {
 
     while IFS= read -r record; do
         name=$(jq -r '.name' <<< "${record}")
-        duration=$(jq -r '.time' <<< "${record}")
+        duration=$(jq -r '.duration' <<< "${record}")
         excerpt=$(jq -r '.excerpt' <<< "${record}")
         [[ -z "${name}" ]] && continue
 

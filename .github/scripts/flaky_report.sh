@@ -13,7 +13,7 @@
 #   OBSERVED_TESTS_FILE - JSONL to write, one object per test that ran, sorted
 #                         by name:
 #                           {"name": ..., "status": "pass"|"fail",
-#                            "time": <seconds>, "excerpt": ...}
+#                            "duration": <seconds>, "excerpt": ...}
 #                         `excerpt` is empty for passing tests. Skipped tests are
 #                         omitted: they never reached a verdict.
 #
@@ -96,8 +96,8 @@ main() {
                 --arg name "${name}" \
                 --arg status "${status}" \
                 --arg excerpt "${excerpt_text}" \
-                --argjson time "${duration:-0}" \
-                '{name: $name, status: $status, time: $time, excerpt: $excerpt}' \
+                --argjson duration "${duration:-0}" \
+                '{name: $name, status: $status, duration: $duration, excerpt: $excerpt}' \
                 >> "${CFG_OBSERVED_TESTS_FILE}"
         done < <(test_names "${report}" '//testcase/@name')
     done
@@ -131,7 +131,7 @@ main() {
         summary "| --- | --- |"
         while IFS=$'\t' read -r name duration; do
             summary "| \`${name}\` | ${duration}s |"
-        done < <(jq -r 'select(.status == "fail") | [.name, .time] | @tsv' "${CFG_OBSERVED_TESTS_FILE}")
+        done < <(jq -r 'select(.status == "fail") | [.name, .duration] | @tsv' "${CFG_OBSERVED_TESTS_FILE}")
         summary ""
 
         # The failing records, collapsed so they do not dominate the summary.
