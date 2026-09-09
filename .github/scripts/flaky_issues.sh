@@ -270,12 +270,6 @@ file_failure_issues() {
             {
                 echo "The following test looks flaky: \`${name}\`."
                 echo
-                echo "**Triage**"
-                echo
-                echo "- [ ] Reproduced"
-                echo "- [ ] Classified: test bug or production bug"
-                echo "- [ ] Root cause identified"
-                echo
                 echo "> Filed automatically by \`${CFG_WORKFLOW_NAME}\`."
                 echo
                 echo "${marker}"
