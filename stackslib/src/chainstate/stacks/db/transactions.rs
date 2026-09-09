@@ -32,11 +32,12 @@ use clarity::vm::types::{
     BuffData, PrincipalData, QualifiedContractIdentifier, SequenceData,
     StacksAddressExtensions as ClarityStacksAddressExt, TupleData, TypeSignature, Value,
 };
+use stacks_common::bounded_format;
 
 use crate::chainstate::nakamoto::miner::MinerTenureInfoCause;
 use crate::chainstate::stacks::db::*;
 use crate::chainstate::stacks::miner::{TransactionResourceBudgets, TransactionResult};
-use crate::chainstate::stacks::{Error, StacksMicroblockHeader};
+use crate::chainstate::stacks::{CostOverflowContext, Error, StacksMicroblockHeader};
 use crate::clarity_vm::clarity::{ClarityConnection, ClarityError, ClarityTransactionConnection};
 use crate::monitoring::increment_unreachable_errors_counter;
 use crate::util_lib::strings::VecDisplay;
@@ -69,7 +70,7 @@ impl StacksTransactionReceipt {
         result: Value,
         burned: u128,
         cost: ExecutionCost,
-        vm_error: Option<String>,
+        vm_error: Option<BoundedErrorString>,
     ) -> StacksTransactionReceipt {
         StacksTransactionReceipt {
             transaction: tx.into(),
@@ -92,7 +93,7 @@ impl StacksTransactionReceipt {
         result: Value,
         burned: u128,
         cost: ExecutionCost,
-        reason: String,
+        reason: BoundedErrorString,
     ) -> StacksTransactionReceipt {
         StacksTransactionReceipt {
             transaction: tx.into(),
@@ -137,7 +138,7 @@ impl StacksTransactionReceipt {
         burned: u128,
         analysis: ContractAnalysis,
         cost: ExecutionCost,
-        reason: String,
+        reason: BoundedErrorString,
     ) -> StacksTransactionReceipt {
         StacksTransactionReceipt {
             transaction: tx.into(),
@@ -175,28 +176,32 @@ impl StacksTransactionReceipt {
         analysis_cost: ExecutionCost,
         error: ClarityError,
     ) -> StacksTransactionReceipt {
-        let error_string = match error {
+        let vm_error = match error {
             ClarityError::StaticCheck(ref static_check_error) => {
                 if let Some(span) = static_check_error.diagnostic.spans.first() {
-                    format!(
+                    bounded_format!(
                         ":{}:{}: {}",
-                        span.start_line, span.start_column, static_check_error.diagnostic.message
+                        span.start_line,
+                        span.start_column,
+                        static_check_error.diagnostic.message
                     )
                 } else {
-                    static_check_error.diagnostic.message.to_string()
+                    static_check_error.diagnostic.message.clone()
                 }
             }
             ClarityError::Parse(ref parse_error) => {
                 if let Some(span) = parse_error.diagnostic.spans.first() {
-                    format!(
+                    bounded_format!(
                         ":{}:{}: {}",
-                        span.start_line, span.start_column, parse_error.diagnostic.message
+                        span.start_line,
+                        span.start_column,
+                        parse_error.diagnostic.message
                     )
                 } else {
-                    parse_error.diagnostic.message.to_string()
+                    parse_error.diagnostic.message.clone()
                 }
             }
-            _ => error.to_string(),
+            _ => BoundedErrorString::from_display(&error),
         };
         StacksTransactionReceipt {
             transaction: tx.into(),
@@ -208,7 +213,7 @@ impl StacksTransactionReceipt {
             execution_cost: analysis_cost,
             microblock_header: None,
             tx_index: 0,
-            vm_error: Some(error_string),
+            vm_error: Some(vm_error),
             problematic_skipped: None,
         }
     }
@@ -249,7 +254,7 @@ impl StacksTransactionReceipt {
             execution_cost: cost,
             microblock_header: None,
             tx_index: 0,
-            vm_error: Some(error.to_string()),
+            vm_error: Some(BoundedErrorString::from_display(&error)),
             problematic_skipped: None,
         }
     }
@@ -269,7 +274,7 @@ impl StacksTransactionReceipt {
             execution_cost: cost,
             microblock_header: None,
             tx_index: 0,
-            vm_error: Some(error.to_string()),
+            vm_error: Some(BoundedErrorString::from_display(&error)),
             problematic_skipped: None,
         }
     }
@@ -335,6 +340,17 @@ pub struct TransactionNonceMismatch {
     pub quiet: bool,
 }
 
+/// A nonce mismatch together with the account states used to validate it.
+#[derive(Debug)]
+pub struct NonceCheckFailure {
+    /// Details of the invalid origin or sponsor nonce.
+    pub mismatch: TransactionNonceMismatch,
+    /// Origin account state at validation time.
+    pub origin_account: StacksAccount,
+    /// Payer account state at validation time.
+    pub payer_account: StacksAccount,
+}
+
 impl std::fmt::Display for TransactionNonceMismatch {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         let acct_type = if self.is_origin { "origin" } else { "sponsor" };
@@ -350,9 +366,9 @@ impl std::fmt::Display for TransactionNonceMismatch {
     }
 }
 
-impl<T> From<(TransactionNonceMismatch, T)> for Error {
-    fn from(e: (TransactionNonceMismatch, T)) -> Error {
-        Error::InvalidStacksTransaction(e.0.to_string(), e.0.quiet)
+impl From<Box<NonceCheckFailure>> for Error {
+    fn from(failure: Box<NonceCheckFailure>) -> Error {
+        Error::InvalidStacksTransaction(failure.mismatch.to_string(), failure.mismatch.quiet)
     }
 }
 
@@ -379,7 +395,7 @@ fn log_unreachable_error(error: &ClarityError, txid: &Txid) {
                 "event_name" => "unreachable_error",
                 "error_type" => "static_check",
                 "txid" => %txid,
-                "error" => %static_err,
+                "error" => %BoundedErrorString::from_display(&static_err),
             );
             increment_unreachable_errors_counter("static_check");
         }
@@ -390,7 +406,7 @@ fn log_unreachable_error(error: &ClarityError, txid: &Txid) {
                 "event_name" => "unreachable_error",
                 "error_type" => "runtime_check",
                 "txid" => %txid,
-                "error" => %runtime_check_err,
+                "error" => %BoundedErrorString::from_display(runtime_check_err),
             );
             increment_unreachable_errors_counter("runtime_check");
         }
@@ -417,20 +433,21 @@ pub fn finalize_failed_transaction(
         TransactionResult::problematic(tx, error)
     } else {
         match &error {
-            Error::CostOverflowError(overflow_cost_before, cost_after, total_budget) => {
+            Error::CostOverflowError(context) => {
                 // note: this path _does_ not perform the tx block budget % heuristic,
                 //  because this code path is not directly called with a mempool handle.
                 clarity_tx.reset_cost(cost_before.clone());
-                if total_budget.proportion_largest_dimension(overflow_cost_before)
+                if context.budget.proportion_largest_dimension(&context.before)
                     < TX_BLOCK_LIMIT_PROPORTION_HEURISTIC
                 {
                     warn!(
-                        "Transaction {} consumed over {}% of block budget, marking as invalid; budget was {total_budget}",
+                        "Transaction {} consumed over {}% of block budget, marking as invalid; budget was {}",
                         tx.txid(),
-                        100 - TX_BLOCK_LIMIT_PROPORTION_HEURISTIC
+                        100 - TX_BLOCK_LIMIT_PROPORTION_HEURISTIC,
+                        context.budget,
                     );
-                    let mut measured_cost = cost_after.clone();
-                    let measured_cost = if measured_cost.sub(overflow_cost_before).is_ok() {
+                    let mut measured_cost = context.after.clone();
+                    let measured_cost = if measured_cost.sub(&context.before).is_ok() {
                         Some(measured_cost)
                     } else {
                         warn!("Failed to compute measured cost of a too big transaction");
@@ -439,8 +456,10 @@ pub fn finalize_failed_transaction(
                     TransactionResult::error(tx, Error::TransactionTooBigError(measured_cost))
                 } else {
                     warn!(
-                        "Transaction {} reached block cost {cost_after}; budget was {total_budget}",
-                        tx.txid()
+                        "Transaction {} reached block cost {}; budget was {}",
+                        tx.txid(),
+                        context.after,
+                        context.budget
                     );
                     TransactionResult::skipped_due_to_error(tx, Error::BlockTooBigError)
                 }
@@ -475,10 +494,7 @@ impl StacksChainState {
         clarity_tx: &mut T,
         tx: &StacksTransaction,
         quiet: bool,
-    ) -> Result<
-        (StacksAccount, StacksAccount),
-        (TransactionNonceMismatch, (StacksAccount, StacksAccount)),
-    > {
+    ) -> Result<(StacksAccount, StacksAccount), Box<NonceCheckFailure>> {
         // who's sending it?
         let origin = tx.get_origin();
         let origin_account = StacksChainState::get_account(clarity_tx, &tx.origin_address().into());
@@ -500,7 +516,11 @@ impl StacksChainState {
                 if !quiet {
                     warn!("{e}");
                 }
-                return Err((e, (origin_account, payer_account)));
+                return Err(Box::new(NonceCheckFailure {
+                    mismatch: e,
+                    origin_account,
+                    payer_account,
+                }));
             }
 
             payer_account
@@ -521,7 +541,11 @@ impl StacksChainState {
             if !quiet {
                 warn!("{e}");
             }
-            return Err((e, (origin_account, payer_account)));
+            return Err(Box::new(NonceCheckFailure {
+                mismatch: e,
+                origin_account,
+                payer_account,
+            }));
         }
 
         Ok((origin_account, payer_account))
@@ -667,7 +691,7 @@ impl StacksChainState {
         asset_map: &AssetMap,
         epoch_id: StacksEpochId,
         txid: Txid,
-    ) -> Result<Option<String>, SerializationError> {
+    ) -> Result<Option<BoundedErrorString>, SerializationError> {
         let result = stacks_transactions::check_transaction_postconditions(
             post_conditions,
             post_condition_mode,
@@ -995,6 +1019,7 @@ impl StacksChainState {
                                 err_type,
                                 ..
                             }) => {
+                                let vm_error = BoundedErrorString::from_display(&error);
                                 info!("Contract-call processed with {}", err_type;
                                           "txid" => %tx.txid(),
                                           "origin" => %origin_account.principal,
@@ -1002,13 +1027,8 @@ impl StacksChainState {
                                           "contract_name" => %contract_id,
                                           "function_name" => %contract_call.function_name,
                                           "function_args" => %VecDisplay(&contract_call.function_args),
-                                          "error" => ?error);
-                                (
-                                    Value::err_none(),
-                                    AssetMap::new(),
-                                    vec![],
-                                    Some(error.to_string()),
-                                )
+                                          "error" => %vm_error);
+                                (Value::err_none(), AssetMap::new(), vec![], Some(vm_error))
                             }
                             ClarityRuntimeTxError::Included(
                                 IncludedRuntimeTxError::AbortedByCallback {
@@ -1045,9 +1065,12 @@ impl StacksChainState {
                             }) => {
                                 warn!("Block compute budget exceeded: if included, this will invalidate a block"; "txid" => %tx.txid(), "cost" => %cost_after, "budget" => %budget);
                                 return Err(Error::CostOverflowError(
-                                    cost_before,
-                                    cost_after,
-                                    budget,
+                                    CostOverflowContext {
+                                        before: cost_before,
+                                        after: cost_after,
+                                        budget,
+                                    }
+                                    .into(),
                                 ));
                             }
                             ClarityRuntimeTxError::Included(IncludedRuntimeTxError::Analysis {
@@ -1061,7 +1084,7 @@ impl StacksChainState {
                                           "contract_name" => %contract_id,
                                           "function_name" => %contract_call.function_name,
                                           "function_args" => %VecDisplay(&contract_call.function_args),
-                                          "error" => %runtime_check_err);
+                                          "error" => %BoundedErrorString::from_display(&runtime_check_err));
 
                                 let receipt =
                                     StacksTransactionReceipt::from_runtime_failure_contract_call(
@@ -1175,9 +1198,12 @@ impl StacksChainState {
                                             &budget
                                         );
                                     return Err(Error::CostOverflowError(
-                                        cost_before,
-                                        cost_after,
-                                        budget,
+                                        CostOverflowContext {
+                                            before: cost_before,
+                                            after: cost_after,
+                                            budget,
+                                        }
+                                        .into(),
                                     ));
                                 }
                                 ClarityError::AnalysisResourceBudgetExceeded(s) => {
@@ -1272,10 +1298,11 @@ impl StacksChainState {
                                 err_type,
                                 ..
                             }) => {
+                                let vm_error = BoundedErrorString::from_display(&error);
                                 info!("Smart-contract processed with {}", err_type;
                                           "txid" => %tx.txid(),
                                           "contract" => %contract_id,
-                                          "error" => ?error);
+                                          "error" => %vm_error);
                                 // When top-level code in a contract publish causes a runtime error,
                                 // the transaction is accepted, but the contract is not created.
                                 //   Return a tx receipt with an `err_none()` result to indicate
@@ -1290,7 +1317,7 @@ impl StacksChainState {
                                     execution_cost: total_cost,
                                     microblock_header: None,
                                     tx_index: 0,
-                                    vm_error: Some(error.to_string()),
+                                    vm_error: Some(vm_error),
                                     problematic_skipped: None,
                                 };
                                 return Ok(receipt);
@@ -1326,9 +1353,12 @@ impl StacksChainState {
                                           "cost" => %cost_after,
                                           "budget" => %budget);
                                 return Err(Error::CostOverflowError(
-                                    cost_before,
-                                    cost_after,
-                                    budget,
+                                    CostOverflowContext {
+                                        before: cost_before,
+                                        after: cost_after,
+                                        budget,
+                                    }
+                                    .into(),
                                 ));
                             }
                             ClarityRuntimeTxError::Included(IncludedRuntimeTxError::Analysis {
@@ -1338,7 +1368,7 @@ impl StacksChainState {
                                 info!("Smart-contract encountered an analysis error at runtime";
                                           "txid" => %tx.txid(),
                                           "contract" => %contract_id,
-                                          "error" => %runtime_check_err);
+                                          "error" => %BoundedErrorString::from_display(&runtime_check_err));
 
                                 let receipt =
                                     StacksTransactionReceipt::from_runtime_failure_smart_contract(
@@ -1676,6 +1706,16 @@ pub mod test {
     use super::*;
     use crate::chainstate::stacks::db::testing::*;
     use crate::chainstate::stacks::{Error, *};
+
+    fn expect_runtime_check_error(error: Error) -> RuntimeCheckErrorKind {
+        let Error::ClarityError(ClarityError::Interpreter(error)) = error else {
+            panic!("Did not get unchecked interpreter error");
+        };
+        let VmExecutionError::RuntimeCheck(error) = error else {
+            panic!("Did not get runtime check error");
+        };
+        error
+    }
 
     pub const TestBurnStateDB_20: UnitTestBurnStateDB = UnitTestBurnStateDB {
         epoch_id: StacksEpochId::Epoch20,
@@ -2839,7 +2879,7 @@ pub mod test {
                     } else {
                         expected_errors[i].to_string()
                     };
-                assert_eq!(receipt.vm_error.unwrap(), expected_error);
+                assert_eq!(receipt.vm_error.as_deref(), Some(expected_error.as_str()));
 
                 next_nonce += 1;
             }
@@ -6925,13 +6965,7 @@ pub mod test {
             false,
         )
         .unwrap_err();
-        if let Error::ClarityError(ClarityError::Interpreter(VmExecutionError::RuntimeCheck(
-            _runtime_check_err,
-        ))) = err
-        {
-        } else {
-            panic!("Did not get unchecked interpreter error");
-        }
+        expect_runtime_check_error(err);
 
         let err = validate_transactions_static_epoch_and_process_transaction(
             &mut conn,
@@ -6978,13 +7012,7 @@ pub mod test {
             false,
         )
         .unwrap_err();
-        if let Error::ClarityError(ClarityError::Interpreter(VmExecutionError::RuntimeCheck(
-            _runtime_check_err,
-        ))) = err
-        {
-        } else {
-            panic!("Did not get unchecked interpreter error");
-        }
+        expect_runtime_check_error(err);
         let acct = StacksChainState::get_account(&mut conn, &addr.clone().into());
         assert_eq!(acct.nonce, 3);
 
@@ -7029,13 +7057,7 @@ pub mod test {
             false,
         )
         .unwrap_err();
-        if let Error::ClarityError(ClarityError::Interpreter(VmExecutionError::RuntimeCheck(
-            _runtime_check_err,
-        ))) = err
-        {
-        } else {
-            panic!("Did not get unchecked interpreter error");
-        }
+        expect_runtime_check_error(err);
 
         let err = validate_transactions_static_epoch_and_process_transaction(
             &mut conn,
@@ -7081,13 +7103,7 @@ pub mod test {
             false,
         )
         .unwrap_err();
-        if let Error::ClarityError(ClarityError::Interpreter(VmExecutionError::RuntimeCheck(
-            _runtime_check_err,
-        ))) = err
-        {
-        } else {
-            panic!("Did not get unchecked interpreter error");
-        }
+        expect_runtime_check_error(err);
         let acct = StacksChainState::get_account(&mut conn, &addr.clone().into());
         assert_eq!(acct.nonce, 3);
 
@@ -7586,13 +7602,7 @@ pub mod test {
             false,
         )
         .unwrap_err();
-        if let Error::ClarityError(ClarityError::Interpreter(VmExecutionError::RuntimeCheck(
-            runtime_check_err,
-        ))) = err
-        {
-        } else {
-            panic!("Did not get unchecked interpreter error");
-        }
+        expect_runtime_check_error(err);
 
         let err = validate_transactions_static_epoch_and_process_transaction(
             &mut conn,
@@ -8046,13 +8056,7 @@ pub mod test {
             false,
         )
         .unwrap_err();
-        if let Error::ClarityError(ClarityError::Interpreter(VmExecutionError::RuntimeCheck(
-            runtime_check_err,
-        ))) = err
-        {
-        } else {
-            panic!("Did not get unchecked interpreter error");
-        }
+        expect_runtime_check_error(err);
         assert_eq!(fee, 1);
 
         let err = validate_transactions_static_epoch_and_process_transaction(
@@ -8152,17 +8156,11 @@ pub mod test {
             false,
         )
         .unwrap_err();
-        if let Error::ClarityError(ClarityError::Interpreter(VmExecutionError::RuntimeCheck(
-            runtime_check_err,
-        ))) = err
-        {
-            assert!(
-                matches!(runtime_check_err, RuntimeCheckErrorKind::TraitReferenceUnknown(ref name) if name == "foo"),
-                "Expected TraitReferenceUnknown(\"foo\") runtime check error"
-            );
-        } else {
-            panic!("Did not get unchecked interpreter error");
-        };
+        let runtime_check_err = expect_runtime_check_error(err);
+        assert!(
+            matches!(runtime_check_err, RuntimeCheckErrorKind::TraitReferenceUnknown(ref name) if name == "foo"),
+            "Expected TraitReferenceUnknown(\"foo\") runtime check error"
+        );
 
         let err = validate_transactions_static_epoch_and_process_transaction(
             &mut conn,

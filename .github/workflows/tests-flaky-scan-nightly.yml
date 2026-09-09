@@ -94,7 +94,6 @@ concurrency:
 # Env vars
 env:
   TEST_ARCHIVE_FILE: "./test_archive.tar.zst"
-  DEBUG_BINARY_PATH: "./target/debug/"
   # nextest profile with retries disabled (see .github/nextest/ci-nextest.toml).
   #
   # Do NOT name this NEXTEST_PROFILE: that variable is read by cargo-nextest
@@ -148,7 +147,6 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       test-archive-file: ${{ steps.set-env.outputs.test_archive_file }}
-      debug-binary-path: ${{ steps.set-env.outputs.debug_binary_path }}
       nextest-profile: ${{ steps.set-env.outputs.nextest_profile }}
     steps:
       - name: Export Env Variables
@@ -164,7 +162,6 @@ jobs:
           PROFILE="${{ env.WF_NEXTEST_PROFILE }}"
 
           echo "test_archive_file=$ARCHIVE_FILE" >> $GITHUB_OUTPUT
-          echo "debug_binary_path=${{ env.DEBUG_BINARY_PATH }}" >> $GITHUB_OUTPUT
           echo "nextest_profile=$PROFILE" >> $GITHUB_OUTPUT
 
           echo "### Flaky Scan Nightly setup" >> $GITHUB_STEP_SUMMARY
@@ -214,7 +211,6 @@ jobs:
         with:
           action: create
           archive-file: ${{ needs.setup-env.outputs.test-archive-file }}
-          debug-binary-path: ${{ needs.setup-env.outputs.debug-binary-path }}
 
   ############################################################################
   ### Run Bitcoin Tests
@@ -230,7 +226,6 @@ jobs:
     uses: ./.github/workflows/_tests-bitcoin.yml
     with:
       archive-file: ${{ needs.setup-env.outputs.test-archive-file }}
-      debug-binary-path: ${{ needs.setup-env.outputs.debug-binary-path }}
       nextest-profile: ${{ needs.setup-env.outputs.nextest-profile }}
       only-tests: ${{ inputs.only-tests }}
       upload-junit-xml: "true"
@@ -273,12 +268,12 @@ jobs:
             .github
 
       # Download the nextest JUnit reports produced by the test jobs
-      #   - pattern is narrowed to the per-test reports on purpose. `nextest-*`
-      #     also matches `nextest-archive`, which is no needed.
+      #   - pattern is narrowed to the per-test reports on purpose, so this
+      #     never picks up an unrelated artifact from the same run.
       - name: Download nextest JUnit artifacts
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
         with:
-          pattern: nextest-isolated-test-*
+          pattern: junit-isolated-test-*
           path: ${{ env.JUNIT_DIR }}
           merge-multiple: true
 
