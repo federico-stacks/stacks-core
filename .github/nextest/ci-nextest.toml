@@ -31,14 +31,10 @@ path = "../../../junit.xml"
 #
 # What survives is nextest's own verdict in the `message` attribute: the panic
 # location and thread, the abort signal, or the timeout. The full output stays
-# in the job log, which GitHub retains for 90 days.
-#
-# Safe to disable: the only consumer of these reports is the summary job in
-# ci.yml, which matches the classname/name/time attributes and the retry
-# element names, never the output.
+# in the job log under repo retention policy.
 store-failure-output = false
 # Already the nextest default; set explicitly so a change of default cannot
-# silently start embedding passing tests' output.
+# silently start embedding passing tests output.
 store-success-output = false
 
 [profile.ci-sequential]
@@ -56,15 +52,12 @@ test-threads = "num-cpus"
 # Profile for the flakiness scan workflow (`tests-flaky-scan-nightly.yml`).
 #
 # This scan exists to *measure* flakiness, so it deliberately diverges from
-# the `ci` profile. Do not "fix" these settings to match `ci`.
+# the `ci` profile..
 [profile.flaky-scan]
 inherits = "ci"
-# A single attempt per test IS the datapoint. With retries a test that fails and
-# then passes reports green, which hides exactly the fail-then-pass flakes this
-# run exists to find: at a 30% per-attempt failure rate, a test survives three
-# attempts ~97% of the time and looks healthy on all but a handful of nights.
+# No retries to gather any test failure.
 retries = 0
 # One failing test must never suppress results for the rest of its partition.
 fail-fast = false
-# The scan runs one test per job, same as `ci-sequential`.
+# Run tests sequentially in a job.
 test-threads = 1

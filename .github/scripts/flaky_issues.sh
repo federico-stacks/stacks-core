@@ -10,7 +10,7 @@
 #   2b. Tests never SEEN    -> close the issue once the test has gone unobserved
 #                              for ORPHAN_AFTER runs (renamed, deleted, excluded)
 #
-# A run that failed MASS_FAILURE_THRESHOLD or more tests is treated as broken
+# A run that failed more than MAX_FLAKY_FAILURES tests is treated as broken
 # rather than flaky: none of the three phases runs, because the results are not
 # trustworthy evidence about any individual test - see the guard in main().
 #
@@ -33,25 +33,26 @@
 #                         count its own run history, so the count follows the
 #                         workflow it is running in and cannot drift out of
 #                         sync with a hardcoded name
-#   MAX_NEW_ISSUES      - cap on issues CREATED in one run. Commenting on issues
-#                         that already exist is never capped. Anything deferred
-#                         is named in the job summary, never dropped silently
 #   QUIET_AFTER         - how many quiet runs before an issue is closed.
 #                         0 closes as soon as the test passes
-#   QUIET_RUN_EVENTS    - comma-separated workflow event names that count as a
-#                         chance for the test to fail; surrounding whitespace is
-#                         trimmed, so "schedule, workflow_dispatch" works.
-#                         Scheduled runs are always full-width, which is what
-#                         makes them a fair measure; `workflow_dispatch` can be
-#                         added to exercise the threshold without waiting for
-#                         the cron
+#   COUNT_MANUAL_RUNS   - "true" to also count manual runs towards QUIET_AFTER
+#                         and ORPHAN_AFTER. Scheduled runs always count, and are
+#                         the only sound measure: they are full-width, whereas a
+#                         manual run can be narrowed by `only-tests` and so gives
+#                         most tests no chance to fail. Counting manual runs is
+#                         therefore a testing-only relaxation, to exercise the
+#                         thresholds without waiting for the cron
 #   ORPHAN_AFTER        - how many runs a test may go *unobserved* before its
 #                         issue is closed as no longer watched. Must be greater
 #                         than QUIET_AFTER - see close_quiet_issues()
-#   MASS_FAILURE_THRESHOLD
-#                       - failures at or above which the run is treated as
-#                         broken and no issue is touched at all.
-#   DRY_RUN             - "true" to print every mutation instead of performing it
+#   MAX_FLAKY_FAILURES  - the most failures still attributable to flakiness.
+#                         Above it the run is treated as broken and no issue is
+#                         touched at all. This is also the bound on how
+#                         many issues one run can write.
+#   DRY_RUN_ISSUES      - "true" to print each issue write instead of making
+#                         it. Scoped to issue and label writes only: the tests
+#                         still run, every read still happens, and a broken
+#                         harness still alerts. Nothing here makes the run cheap
 #   FLAKY_LABEL         - the label every issue carries.
 #   OBSERVED_TESTS_FILE - JSONL written by flaky_report.sh earlier in the same
 #                         job.
@@ -76,7 +77,6 @@ main() {
     local existing_issues observed_count failed_count
     local created=0 updated=0 reopened=0 closed=0 orphaned=0
     local run_looks_broken="false"
-    local -a deferred=()
     
     # Precondition: this run must have observed something
     if [[ ! -s "${CFG_OBSERVED_TESTS_FILE}" ]]; then
@@ -95,9 +95,9 @@ main() {
     info "Observed $(hl "${observed_count}") test(s), $(hl "${failed_count}") failing, on $(hl "${CFG_REPO}")"
 
     # Mass-failure guard: is this a flaky run, or a broken one?
-    if (( failed_count >= CFG_MASS_FAILURE_THRESHOLD )); then
+    if (( failed_count > CFG_MAX_FLAKY_FAILURES )); then
         run_looks_broken="true"
-        warn "$(hl "${failed_count}") failures at or above $(hl "MASS_FAILURE_THRESHOLD")=$(hl "${CFG_MASS_FAILURE_THRESHOLD}")"
+        warn "$(hl "${failed_count}") failures, more than $(hl "MAX_FLAKY_FAILURES")=$(hl "${CFG_MAX_FLAKY_FAILURES}")"
         warn "Treating this run as broken: nothing will be filed, commented on, or closed"
         report_summary
         return 1
@@ -139,24 +139,22 @@ initialize() {
     require_vars "Custom input" \
         OBSERVED_TESTS_FILE \
         FLAKY_LABEL \
-        MAX_NEW_ISSUES \
+        COUNT_MANUAL_RUNS \
         QUIET_AFTER \
-        QUIET_RUN_EVENTS \
         ORPHAN_AFTER \
-        MASS_FAILURE_THRESHOLD \
-        DRY_RUN
+        DRY_RUN_ISSUES \
+        MAX_FLAKY_FAILURES
 
     # Configuration
     CFG_WORKFLOW_NAME="${GITHUB_WORKFLOW}"
     CFG_REPO="${GITHUB_REPOSITORY}"
     CFG_OBSERVED_TESTS_FILE="${OBSERVED_TESTS_FILE}"
     CFG_FLAKY_LABEL="${FLAKY_LABEL}"
-    CFG_MAX_NEW_ISSUES="${MAX_NEW_ISSUES}"
+    CFG_COUNT_MANUAL_RUNS="${COUNT_MANUAL_RUNS}"
     CFG_QUIET_AFTER="${QUIET_AFTER}"
-    CFG_QUIET_RUN_EVENTS="${QUIET_RUN_EVENTS}"
     CFG_ORPHAN_AFTER="${ORPHAN_AFTER}"
-    CFG_MASS_FAILURE_THRESHOLD="${MASS_FAILURE_THRESHOLD}"
-    CFG_DRY_RUN="${DRY_RUN}"
+    CFG_DRY_RUN_ISSUES="${DRY_RUN_ISSUES}"
+    CFG_MAX_FLAKY_FAILURES="${MAX_FLAKY_FAILURES}"
     
     # Marker carrying the fully qualified test name within a Github issue
     CFG_ID_MARKER_PREFIX="test-id"
@@ -182,7 +180,7 @@ initialize() {
         exit 1
     fi
 
-    info "Config: quiet-after=$(hl "${CFG_QUIET_AFTER}") orphan-after=$(hl "${CFG_ORPHAN_AFTER}") mass-failure=$(hl "${CFG_MASS_FAILURE_THRESHOLD}") max-new=$(hl "${CFG_MAX_NEW_ISSUES}") events=$(hl "${CFG_QUIET_RUN_EVENTS}") dry-run=$(hl "${CFG_DRY_RUN}")"
+    info "Config: quiet-after=$(hl "${CFG_QUIET_AFTER}") orphan-after=$(hl "${CFG_ORPHAN_AFTER}") max-flaky-failures=$(hl "${CFG_MAX_FLAKY_FAILURES}") count-manual-runs=$(hl "${CFG_COUNT_MANUAL_RUNS}") dry-run-issues=$(hl "${CFG_DRY_RUN_ISSUES}")"
     
     # Preconditions: Github issues must be enabled
     if [[ "$(gh api "repos/${CFG_REPO}" --jq '.has_issues')" != "true" ]]; then
@@ -190,7 +188,7 @@ initialize() {
         exit 1
     fi
 
-    # Preconditions: Github lable must exists
+    # Preconditions: Github label must exists
     ensure_flaky_label
 }
 
@@ -268,12 +266,6 @@ file_failure_issues() {
         IFS=$'\t' read -r number state <<< "${match}"
 
         if [[ -z "${number}" ]]; then
-            if (( created >= CFG_MAX_NEW_ISSUES )); then
-                deferred+=("${name}")
-                rm -f "${comment_file}"
-                continue
-            fi
-
             body_file="$(mktemp)"
             {
                 echo "The following test looks flaky: \`${name}\`."
@@ -302,7 +294,7 @@ file_failure_issues() {
                 number="${url##*/}"
                 gh_mutate issue comment "${number}" --repo "${CFG_REPO}" \
                     --body-file "${comment_file}"
-            elif [[ "${CFG_DRY_RUN}" == "true" ]]; then
+            elif [[ "${CFG_DRY_RUN_ISSUES}" == "true" ]]; then
                 info "DRY-RUN: gh issue comment <new issue> --repo ${CFG_REPO} --body-file <evidence>"
             fi
             created=$(( created + 1 ))
@@ -332,6 +324,7 @@ file_failure_issues() {
 close_quiet_issues() {
     local existing_issues="$1"
     local quiet_runs number state test_id test_status last_failure quiet_count
+    local manual_label
     local comment reason
     local -A observed_status=()
 
@@ -342,26 +335,27 @@ close_quiet_issues() {
     done < <(jq -r '[.name, .status] | @tsv' "${CFG_OBSERVED_TESTS_FILE}")
 
     # Runs that gave every test a chance to fail. One call for the whole phase.
-    # Event names are trimmed because QUIET_RUN_EVENTS is free-text: without it
-    # "schedule, workflow_dispatch" silently drops the second name.
     quiet_runs=$(gh run list --repo "${CFG_REPO}" --workflow "${CFG_WORKFLOW_NAME}" \
         --limit 200 --json event,createdAt,conclusion \
-        | jq -c --arg events "${CFG_QUIET_RUN_EVENTS}" '
-            ($events
-             | split(",")
-             | map(gsub("^\\s+|\\s+$"; ""))
-             | map(select(length > 0))) as $want
-            | [ .[]
-                | select((.event as $e | $want | index($e)) and .conclusion != "cancelled")
-                | .createdAt ]')
+        | jq -c --arg manual "${CFG_COUNT_MANUAL_RUNS}" '
+            [ .[]
+              | select(.conclusion != "cancelled")
+              | select(.event == "schedule"
+                       or ($manual == "true" and .event == "workflow_dispatch"))
+              | .createdAt ]')
 
-    # Nothing can ever close at zero, and a typo in the event names is likelier
-    # than a genuine absence.
-    if [[ "$(jq 'length' <<< "${quiet_runs}")" -eq 0 ]]; then
-        warn "No $(hl "${CFG_QUIET_RUN_EVENTS}") run(s) found - nothing can close as quiet"
+    if [[ "${CFG_COUNT_MANUAL_RUNS}" == "true" ]]; then
+        manual_label="counted"
+    else
+        manual_label="ignored"
     fi
 
-    info "Counting quiet runs against $(hl "$(jq 'length' <<< "${quiet_runs}")") $(hl "${CFG_QUIET_RUN_EVENTS}") run(s)"
+    # Nothing can ever close at zero - most likely the cron has not run yet.
+    if [[ "$(jq 'length' <<< "${quiet_runs}")" -eq 0 ]]; then
+        warn "No qualifying run(s) found - nothing can close as quiet"
+    fi
+
+    info "Counting quiet runs against $(hl "$(jq 'length' <<< "${quiet_runs}")") run(s); manual runs $(hl "${manual_label}")"
 
     while IFS=$'\t' read -r number state test_id last_failure; do
         [[ -z "${test_id}" ]] && continue
@@ -481,8 +475,8 @@ report_summary() {
         # Never let a suppressed run read as a quiet one
         summary "### This run looks broken, not flaky"
         summary ""
-        summary "${failed_count} of ${observed_count} observed tests failed, at or above the"
-        summary "\`MASS_FAILURE_THRESHOLD\` of ${CFG_MASS_FAILURE_THRESHOLD}. A failure count that high"
+        summary "${failed_count} of ${observed_count} observed tests failed, more than the"
+        summary "\`MAX_FLAKY_FAILURES\` of ${CFG_MAX_FLAKY_FAILURES}. A failure count that high"
         summary "usually means the run itself broke - a cache miss, a toolchain break, a corrupt"
         summary "archive - rather than that ${failed_count} tests are independently flaky."
         summary ""
@@ -494,8 +488,8 @@ report_summary() {
         summary "If the failures turn out to be unrelated to each other, this threshold is too low."
         summary ""
     fi
-    if [[ "${CFG_DRY_RUN}" == "true" ]]; then
-        summary "\`DRY_RUN\` was set: no issues were created, updated or closed."
+    if [[ "${CFG_DRY_RUN_ISSUES}" == "true" ]]; then
+        summary "\`DRY_RUN_ISSUES\` was set: no issue was created, updated or closed."
         summary ""
     fi
     summary "| | |"
@@ -509,19 +503,6 @@ report_summary() {
     summary "| Issues closed as no longer watched | ${orphaned} |"
     summary ""
 
-    if (( ${#deferred[@]} > 0 )); then
-        # Never let a cap look like clean results
-        summary "### Deferred to the next run"
-        summary ""
-        summary "The \`MAX_NEW_ISSUES\` cap of ${CFG_MAX_NEW_ISSUES} was reached, so no issue was"
-        summary "filed for these failing tests. They will be filed on a later run."
-        summary ""
-        for name in "${deferred[@]}"; do
-            summary "- \`${name}\`"
-        done
-        summary ""
-    fi
-
     info "Done: $(hl "${created}") created, $(hl "${updated}") updated, $(hl "${reopened}") reopened, $(hl "${closed}") closed, $(hl "${orphaned}") orphaned"
 }
 
@@ -532,9 +513,9 @@ summary() {
         printf '%s\n' "$*" >> "${GITHUB_STEP_SUMMARY}"
     fi
 }
-# Run a mutating gh command, or print it under DRY_RUN
+# Run a gh command that writes, or print it under DRY_RUN_ISSUES
 gh_mutate() {
-    if [[ "${CFG_DRY_RUN}" == "true" ]]; then
+    if [[ "${CFG_DRY_RUN_ISSUES}" == "true" ]]; then
         info "DRY-RUN: gh $*"
     else
         gh "$@"

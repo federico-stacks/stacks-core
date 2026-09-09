@@ -46,41 +46,36 @@ on:
         required: false
         default: ""
         type: string
-      dry-run:
-        description: "Print issue mutations instead of performing them"
+      count-manual-runs:
+        description: "Count manual runs towards quiet-after/orphan-after (testing only; scheduled runs always count)"
+        required: false
+        default: false
+        type: boolean
+      dry-run-issues:
+        description: "Print issue writes instead of making them."
+        required: false
+        default: false
+        type: boolean
+      slack-notify:
+        description: "Post to Slack if the run breaks (scheduled runs always do)"
         required: false
         default: false
         type: boolean
       quiet-after:
-        description: "Quiet scheduled runs before an issue is closed (0 = close as soon as it passes)"
+        description: "Quiet runs count before an issue is closed (0 = close as soon as it passes)"
         required: false
         default: "14"
-        type: string
-      quiet-run-events:
-        description: "Workflow events that count as a chance to fail. Add workflow_dispatch to test the threshold"
-        required: false
-        default: "schedule"
         type: string
       orphan-after:
         description: "Runs a test may go unobserved before its issue closes as unwatched (must exceed quiet-after)"
         required: false
         default: "30"
         type: string
-      mass-failure-threshold:
-        description: "Failures at or above which the run is treated as broken: nothing filed, nothing closed as unwatched"
+      max-flaky-failures:
+        description: "Most failures still treated as flakiness. Above it the run is treated as broken: nothing filed, nothing closed"
         required: false
         default: "15"
         type: string
-      max-new-issues:
-        description: "Cap on issues created in a single run"
-        required: false
-        default: "10"
-        type: string
-      slack-notify:
-        description: "Post to Slack if the run breaks (scheduled runs always do)"
-        required: false
-        default: false
-        type: boolean
 
 # Set default permissions for all jobs
 permissions:
@@ -263,12 +258,11 @@ jobs:
       JUNIT_DIR: "nextest_files"
       OBSERVED_TESTS_FILE: "observed-tests.jsonl"
       FLAKY_LABEL: "flaky"
-      MAX_NEW_ISSUES: ${{ inputs.max-new-issues || '10' }}
       QUIET_AFTER: ${{ inputs.quiet-after || '14' }}
-      QUIET_RUN_EVENTS: ${{ inputs.quiet-run-events || 'schedule' }}
+      COUNT_MANUAL_RUNS: ${{ inputs.count-manual-runs == true }}
       ORPHAN_AFTER: ${{ inputs.orphan-after || '30' }}
-      MASS_FAILURE_THRESHOLD: ${{ inputs.mass-failure-threshold || '15' }}
-      DRY_RUN: ${{ inputs.dry-run == true }}
+      MAX_FLAKY_FAILURES: ${{ inputs.max-flaky-failures || '15' }}
+      DRY_RUN_ISSUES: ${{ inputs.dry-run-issues == true }}
     steps:
       # Checkout the code
       #   - only .github is required for this job
