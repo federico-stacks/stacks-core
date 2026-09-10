@@ -6,8 +6,7 @@
 #  to gather flaky tests failure. 
 #
 # Triggers:
-#   schedule  - 0200 UTC daily, on the default branch. CURRENTLY DISABLED -
-#               see the commented block below
+#   schedule  - 0600 UTC daily, on the default branch
 #   dispatch  - manual, on any branch, with the inputs below.
 #
 # Jobs:
@@ -35,10 +34,9 @@ name: "Tests: Flaky Scan Nightly"
 run-name: "Tests: Flaky Scan Nightly [${{ github.ref_name }}]"
 
 on:
-  # schedule:
-    # 0200 UTC daily. Deliberately clear of the 0500 UTC nightlies, since this
-    # run occupies ~300 jobs.
-  #  - cron: "0 2 * * *"
+  schedule:
+    # 0600 UTC daily. 
+    - cron: "0 6 * * *"
   workflow_dispatch:
     inputs:
       only-tests:
