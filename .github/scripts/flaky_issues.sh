@@ -130,12 +130,15 @@ initialize() {
     fi
 
     # Preconditions: inputs
-    require_vars "Github env" \
+    info "Checking required env vars..."
+    # Github-provided
+    require_vars \
         GH_TOKEN \
         GITHUB_REPOSITORY \
         GITHUB_WORKFLOW
 
-    require_vars "Custom input" \
+    # User-provided
+    require_vars \
         OBSERVED_TESTS_FILE \
         FLAKY_LABEL \
         COUNT_MANUAL_RUNS \
@@ -330,7 +333,7 @@ close_quiet_issues() {
     local existing_issues="$1"
     local -n issues_stats_ref="$2"
     local -n issues_actions_ref="$3"
-    local quiet_runs number state test_id test_status last_failure quiet_count
+    local quiet_runs quiet_runs_total number state test_id test_status last_failure quiet_count
     local manual_label
     local comment reason action
     local -A observed_status=()
@@ -357,12 +360,13 @@ close_quiet_issues() {
         manual_label="ignored"
     fi
 
+    quiet_runs_total=$(jq 'length' <<< "${quiet_runs}")
+    info "Counting quiet runs against $(hl "${quiet_runs_total}") run(s); manual runs $(hl "${manual_label}")"
+
     # Nothing can ever close at zero - most likely the cron has not run yet.
-    if [[ "$(jq 'length' <<< "${quiet_runs}")" -eq 0 ]]; then
+    if (( quiet_runs_total == 0 )); then
         warn "No qualifying run(s) found - nothing can close as quiet"
     fi
-
-    info "Counting quiet runs against $(hl "$(jq 'length' <<< "${quiet_runs}")") run(s); manual runs $(hl "${manual_label}")"
 
     while IFS=$'\t' read -r number state test_id last_failure; do
         [[ -z "${test_id}" ]] && continue
@@ -460,12 +464,9 @@ Last recorded failure: ${last_failure%%T*}."
 **If a test by this name fails again this issue reopens automatically** with the new failure attached."
 }
 
-# Exit unless every named variable is set and non-empty. Reports all the misses
-# at once, since a broken env block tends to drop several. `provider` names who
-# should have supplied them, which is what tells the reader where to look.
+# Exit unless every named variable is set and non-empty.
+# Reports all the misses at once.
 require_vars() {
-    local provider="$1"
-    shift
     local missing=() var
 
     for var in "$@"; do
@@ -473,7 +474,7 @@ require_vars() {
     done
 
     if (( ${#missing[@]} > 0 )); then
-        error "Not provided by ${provider}: $(hl "${missing[*]}")"
+        error "Missing required var(s): $(hl "${missing[*]}")"
         exit 1
     fi
 }
@@ -489,9 +490,6 @@ report_summary_no_observations() {
 
 # The broken-run refusal summary: the run failed too many tests to be trusted.
 report_summary_broken() {
-    # Passed by name, following set_resolved_tag() in docker_bitcoin_majors.sh.
-    # The suffix matters: a nameref whose own name equals its target is a
-    # circular reference and fails at runtime.
     local -n tests_stats_ref="$1"
 
     summary "## Flaky test issues"
@@ -529,11 +527,9 @@ ${issues_stats_ref[updated]} updated, ${issues_stats_ref[reopened]} reopened, ${
         while IFS=$'\t' read -r row_name row_issue row_action; do
             summary "| \`${row_name}\` | ${row_issue} | ${row_action} |"
         done < <(printf '%s\n' "${issues_actions_ref[@]}" | sort -t$'\t' -k1,1)
-        summary ""
     else
         # An empty table reads as broken, so say it plainly
         summary "No issue needed creating, updating or closing."
-        summary ""
     fi
 
     info "Done: $(hl "${issues_stats_ref[created]}") created, $(hl "${issues_stats_ref[updated]}") updated, $(hl "${issues_stats_ref[reopened]}") reopened, $(hl "${issues_stats_ref[closed]}") closed, $(hl "${issues_stats_ref[orphaned]}") orphaned"
@@ -542,15 +538,15 @@ ${issues_stats_ref[updated]} updated, ${issues_stats_ref[reopened]} reopened, ${
 
 # One row of the summary table: <test> <issue> <action>, tab separated.
 issue_action_row() {
-    local test_id="$1" number="$2" action="$3" cell
+    local test_id="$1" number="$2" action="$3" issue=""
 
     if [[ "${number}" =~ ^[0-9]+$ ]]; then
-        cell="[#${number}](https://github.com/${CFG_REPO}/issues/${number})"
+        issue="[#${number}](https://github.com/${CFG_REPO}/issues/${number})"
     else
-        cell="#${number}"
+        issue="#${number}"
     fi
 
-    printf '%s\t%s\t%s' "${test_id}" "${cell}" "${action}"
+    printf '%s\t%s\t%s' "${test_id}" "${issue}" "${action}"
 }
 
 # Append a line to the job summary, and echo it so the log shows the report too

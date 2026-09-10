@@ -147,7 +147,6 @@ main() {
         summary '```'
         summary ""
         summary "</details>"
-        summary ""
     fi
 
     info "Wrote $(hl "${observed_count}") observed test(s), $(hl "${failed_count}") failing, to $(hl "${CFG_OBSERVED_TESTS_FILE}")"
@@ -174,7 +173,8 @@ initialize() {
 
     ## Preconditions: inputs
     # Checked before binding, so the bindings below can be plain expansions.
-    require_vars "the caller" \
+    info "Checking required env vars..."
+    require_vars \
         JUNIT_DIR \
         OBSERVED_TESTS_FILE
 
@@ -182,17 +182,14 @@ initialize() {
     CFG_JUNIT_DIR="${JUNIT_DIR}"
     CFG_OBSERVED_TESTS_FILE="${OBSERVED_TESTS_FILE}"
 
-    # Enough of the output to recognise the failure, without pasting a whole
+    # Enough of the output to recognize the failure, without pasting a whole
     # backtrace into an issue body later. Read by excerpt() below.
     CFG_EXCERPT_LINES=10
 }
 
-# Exit unless every named variable is set and non-empty. Reports all the misses
-# at once, since a broken env block tends to drop several. `provider` names who
-# should have supplied them, which is what tells the reader where to look.
+# Exit unless every named variable is set and non-empty.
+# Reports all the misses at once.
 require_vars() {
-    local provider="$1"
-    shift
     local missing=() var
 
     for var in "$@"; do
@@ -200,7 +197,7 @@ require_vars() {
     done
 
     if (( ${#missing[@]} > 0 )); then
-        error "Not provided by ${provider}: $(hl "${missing[*]}")"
+        error "Missing required var(s): $(hl "${missing[*]}")"
         exit 1
     fi
 }
