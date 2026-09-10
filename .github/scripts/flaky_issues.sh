@@ -283,40 +283,37 @@ file_failure_issues() {
                 --body-file "${body_file}")
             rm -f "${body_file}"
 
-            # Post the first evidence as a comment too, so a new issue and an old
-            # one carry the same shape of history
             if [[ -n "${url}" ]]; then
                 number="${url##*/}"
-                gh_mutate issue comment "${number}" --repo "${CFG_REPO}" \
-                    --body-file "${comment_file}"
-            elif [[ "${CFG_DRY_RUN_ISSUES}" == "true" ]]; then
-                info "DRY-RUN: gh issue comment <new issue> --repo ${CFG_REPO} --body-file <evidence>"
+            else # No url means DRY_RUN_ISSUES otherwise gh failure would have exited
+                number="XYZ"
             fi
-            issues_stats_ref[created]=$(( issues_stats_ref[created] + 1 ))
 
-            if [[ -n "${number}" ]]; then
-                issues_actions_ref+=("${name}"$'\t'"#${number}"$'\t'"created")
-            elif [[ "${CFG_DRY_RUN_ISSUES}" == "true" ]]; then
-                issues_actions_ref+=("${name}"$'\t'"#XYZ"$'\t'"would create")
-            fi
+            action="created"
+
+            gh_mutate issue comment "${number}" --repo "${CFG_REPO}" \
+                    --body-file "${comment_file}"
+
+            issues_stats_ref[created]=$(( issues_stats_ref[created] + 1 ))
+            issues_actions_ref+=("$(issue_action_row "${name}" "${number}" "${action}")")
         else
             # Counters stay disjoint: a reopen counts as reopened, not also as
             # updated, so their sum matches the number of rows in the table.
-            action="updated"
             if [[ "${state}" == "CLOSED" ]]; then
                 info "Reopening #${number} for $(hl "${name}")"
                 gh_mutate issue reopen "${number}" --repo "${CFG_REPO}"
                 issues_stats_ref[reopened]=$(( issues_stats_ref[reopened] + 1 ))
                 action="reopened"
+            else
+                issues_stats_ref[updated]=$(( issues_stats_ref[updated] + 1 ))
+                action="updated"
             fi
 
             info "Adding evidence to #${number} for $(hl "${name}")"
             gh_mutate issue comment "${number}" --repo "${CFG_REPO}" \
                 --body-file "${comment_file}"
-            [[ "${action}" == "updated" ]] \
-                && issues_stats_ref[updated]=$(( issues_stats_ref[updated] + 1 ))
 
-            issues_actions_ref+=("${name}"$'\t'"#${number}"$'\t'"${action}")
+            issues_actions_ref+=("$(issue_action_row "${name}" "${number}" "${action}")")
         fi
 
         rm -f "${comment_file}"
@@ -410,7 +407,7 @@ close_quiet_issues() {
             action="closed — unobserved for ${quiet_count} runs"
         fi
 
-        issues_actions_ref+=("${test_id}"$'\t'"#${number}"$'\t'"${action}")
+        issues_actions_ref+=("$(issue_action_row "${test_id}" "${number}" "${action}")")
 
         gh_mutate issue close "${number}" --repo "${CFG_REPO}" --comment "${comment}"
     done < <(jq -r --arg prefix "${CFG_ID_MARKER_PREFIX}" --arg heading "${CFG_FAILURE_HEADING}" '
@@ -542,6 +539,19 @@ ${issues_stats_ref[updated]} updated, ${issues_stats_ref[reopened]} reopened, ${
     info "Done: $(hl "${issues_stats_ref[created]}") created, $(hl "${issues_stats_ref[updated]}") updated, $(hl "${issues_stats_ref[reopened]}") reopened, $(hl "${issues_stats_ref[closed]}") closed, $(hl "${issues_stats_ref[orphaned]}") orphaned"
 }
 
+
+# One row of the summary table: <test> <issue> <action>, tab separated.
+issue_action_row() {
+    local test_id="$1" number="$2" action="$3" cell
+
+    if [[ "${number}" =~ ^[0-9]+$ ]]; then
+        cell="[#${number}](https://github.com/${CFG_REPO}/issues/${number})"
+    else
+        cell="#${number}"
+    fi
+
+    printf '%s\t%s\t%s' "${test_id}" "${cell}" "${action}"
+}
 
 # Append a line to the job summary, and echo it so the log shows the report too
 summary() {
