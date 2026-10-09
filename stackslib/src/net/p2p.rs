@@ -41,9 +41,15 @@ use crate::chainstate::coordinator::{OnChainRewardSetProvider, RewardCycleInfo};
 use crate::chainstate::nakamoto::coordinator::load_nakamoto_reward_set;
 use crate::chainstate::stacks::boot::RewardSet;
 use crate::chainstate::stacks::db::{StacksBlockHeaderTypes, StacksChainState};
+use crate::chainstate::stacks::boot::{MINERS_NAME, SIGNERS_NAME};
 use crate::chainstate::stacks::StacksBlockHeader;
 use crate::core::{EpochList, StacksEpoch};
-use crate::monitoring::{update_inbound_neighbors, update_outbound_neighbors};
+use crate::monitoring::{
+    increment_stackerdb_received_message_size, observe_peer_buffered_bytes,
+    observe_peer_buffered_messages, set_node_buffered_bytes, set_node_buffered_messages,
+    set_node_stacks_buffered_bytes_by_source, set_node_stacks_buffered_messages_by_source,
+    set_peer_buffered_bytes_max, update_inbound_neighbors, update_outbound_neighbors,
+};
 use crate::net::atlas::{AtlasDB, AttachmentsDownloader};
 use crate::net::chat::{ConversationP2P, NeighborStats};
 use crate::net::connection::{ConnectionOptions, ReplyHandleP2P};
@@ -5007,6 +5013,143 @@ impl PeerNetwork {
         Ok(ret)
     }
 
+    /// Classify a P2P message payload by source contract for telemetry.
+    /// Returns `"signer"` for StackerDBPushChunk on a boot `signers-*` contract,
+    /// `"miner"` for StackerDBPushChunk on the boot `miners` contract,
+    /// and `"other"` for everything else (including StackerDB chunks for
+    /// non-boot contracts).
+    fn classify_message_source(payload: &StacksMessageType) -> &'static str {
+        if let StacksMessageType::StackerDBPushChunk(data) = payload {
+            let name: &str = &data.contract_id.name;
+            if name.starts_with(SIGNERS_NAME) {
+                "signer"
+            } else if name == MINERS_NAME {
+                "miner"
+            } else {
+                "other"
+            }
+        } else {
+            "other"
+        }
+    }
+
+    /// Sample per-conversation buffered-message stats and feed them to the
+    /// monitoring layer. Walks `pending_messages` (sortition) and
+    /// `pending_stacks_messages` (stacks tip), then a third pass over the union
+    /// of their keys to produce a per-peer "combined" view.
+    ///
+    /// For each pass:
+    /// - the histogram receives one observation per peer (records the per-peer
+    ///   distribution),
+    /// - the `_max` gauge records the largest single-peer value this cycle,
+    /// - the `node_*` gauges record the across-peer sum (i.e. node-wide memory
+    ///   currently held in peer buffers).
+    ///
+    /// For the stacks pass, additionally accumulate per-source totals
+    /// (`signer` / `miner` / `other`) and feed them to the by-source gauges.
+    ///
+    /// Cost: O(total_buffered_messages); `wire_size()` is O(1).
+    fn sample_peer_buffered_stats(&self) {
+        let mut sort_peer_max: u64 = 0;
+        let mut sort_node_total_bytes: u64 = 0;
+        let mut sort_node_total_count: u64 = 0;
+        for msgs in self.pending_messages.values() {
+            let bytes: u64 = msgs.iter().map(|m| m.wire_size()).sum();
+            observe_peer_buffered_bytes("sortition", bytes);
+            observe_peer_buffered_messages("sortition", msgs.len());
+            if bytes > sort_peer_max {
+                sort_peer_max = bytes;
+            }
+            sort_node_total_bytes = sort_node_total_bytes.saturating_add(bytes);
+            sort_node_total_count = sort_node_total_count.saturating_add(msgs.len() as u64);
+        }
+        set_peer_buffered_bytes_max("sortition", sort_peer_max as i64);
+        set_node_buffered_bytes("sortition", sort_node_total_bytes as i64);
+        set_node_buffered_messages("sortition", sort_node_total_count as i64);
+
+        let mut stacks_peer_max: u64 = 0;
+        let mut stacks_node_total_bytes: u64 = 0;
+        let mut stacks_node_total_count: u64 = 0;
+        // Per-source accumulators for the stacks buffer. Pre-seed all three
+        // labels so the gauges report 0 explicitly when a category has no
+        // entries, rather than dropping the label series.
+        let mut stacks_by_source_bytes: HashMap<&'static str, u64> = HashMap::new();
+        let mut stacks_by_source_count: HashMap<&'static str, u64> = HashMap::new();
+        for source in ["signer", "miner", "other"] {
+            stacks_by_source_bytes.insert(source, 0);
+            stacks_by_source_count.insert(source, 0);
+        }
+        for msgs in self.pending_stacks_messages.values() {
+            let bytes: u64 = msgs.iter().map(|m| m.wire_size()).sum();
+            observe_peer_buffered_bytes("stacks", bytes);
+            observe_peer_buffered_messages("stacks", msgs.len());
+            if bytes > stacks_peer_max {
+                stacks_peer_max = bytes;
+            }
+            stacks_node_total_bytes = stacks_node_total_bytes.saturating_add(bytes);
+            stacks_node_total_count = stacks_node_total_count.saturating_add(msgs.len() as u64);
+
+            for msg in msgs {
+                let source = Self::classify_message_source(&msg.payload);
+                let b = stacks_by_source_bytes.entry(source).or_insert(0);
+                *b = b.saturating_add(msg.wire_size());
+                let c = stacks_by_source_count.entry(source).or_insert(0);
+                *c = c.saturating_add(1);
+            }
+        }
+        set_peer_buffered_bytes_max("stacks", stacks_peer_max as i64);
+        set_node_buffered_bytes("stacks", stacks_node_total_bytes as i64);
+        set_node_buffered_messages("stacks", stacks_node_total_count as i64);
+        for (source, bytes) in &stacks_by_source_bytes {
+            set_node_stacks_buffered_bytes_by_source(source, *bytes as i64);
+        }
+        for (source, count) in &stacks_by_source_count {
+            set_node_stacks_buffered_messages_by_source(source, *count as i64);
+        }
+
+        // Walk the union of keys so peers present in only one map are still counted.
+        let mut comb_per_peer_max: u64 = 0;
+        let mut comb_node_total_bytes: u64 = 0;
+        let mut comb_node_total_count: u64 = 0;
+        let mut keys: HashSet<&(usize, NeighborKey)> = HashSet::new();
+        keys.extend(self.pending_messages.keys());
+        keys.extend(self.pending_stacks_messages.keys());
+        for k in keys {
+            let s_bytes: u64 = self
+                .pending_messages
+                .get(k)
+                .map(|v| v.iter().map(|m| m.wire_size()).sum())
+                .unwrap_or(0);
+            let s_count = self.pending_messages.get(k).map(|v| v.len()).unwrap_or(0);
+            let p_bytes: u64 = self
+                .pending_stacks_messages
+                .get(k)
+                .map(|v| v.iter().map(|m| m.wire_size()).sum())
+                .unwrap_or(0);
+            let p_count = self
+                .pending_stacks_messages
+                .get(k)
+                .map(|v| v.len())
+                .unwrap_or(0);
+
+            let peer_combined_bytes = s_bytes.saturating_add(p_bytes);
+            let peer_combined_count = s_count + p_count;
+
+            observe_peer_buffered_bytes("combined", peer_combined_bytes);
+            observe_peer_buffered_messages("combined", peer_combined_count);
+
+            if peer_combined_bytes > comb_per_peer_max {
+                comb_per_peer_max = peer_combined_bytes;
+            }
+            comb_node_total_bytes = comb_node_total_bytes.saturating_add(peer_combined_bytes);
+            comb_node_total_count =
+                comb_node_total_count.saturating_add(peer_combined_count as u64);
+        }
+        set_peer_buffered_bytes_max("combined", comb_per_peer_max as i64);
+        set_node_buffered_bytes("combined", comb_node_total_bytes as i64);
+        set_node_buffered_messages("combined", comb_node_total_count as i64);
+    }
+
     /// Update p2p networking state.
     /// -- accept new connections
     /// -- send data on ready sockets
@@ -5053,6 +5196,24 @@ impl PeerNetwork {
                 peer.address.pretty_print()
             );
             self.deregister_peer(peer);
+        }
+
+        // count raw unsolicited messages by (type, source), before auth/classification/buffering
+        let mut unsolicited_counts: HashMap<(&'static str, &'static str), u64> = HashMap::new();
+        for messages in unsolicited_messages.values() {
+            for msg in messages {
+                let name = msg.payload.get_message_name();
+                let source = Self::classify_message_source(&msg.payload);
+                *unsolicited_counts.entry((name, source)).or_insert(0) += 1;
+                // record the wire size of received StackerDB chunks, bucketed by
+                // size range and classified by sender
+                if matches!(msg.payload, StacksMessageType::StackerDBPushChunk(..)) {
+                    increment_stackerdb_received_message_size(source, msg.wire_size());
+                }
+            }
+        }
+        for ((name, source), count) in unsolicited_counts {
+            crate::monitoring::increment_node_unsolicited_messages(name, source, count);
         }
 
         // filter out unsolicited messages and buffer up ones that might become processable
@@ -5176,6 +5337,8 @@ impl PeerNetwork {
         let inbound_neighbors = self.peers.len() - outbound_neighbors as usize;
         update_outbound_neighbors(outbound_neighbors as i64);
         update_inbound_neighbors(inbound_neighbors as i64);
+
+        self.sample_peer_buffered_stats();
 
         // fault injection -- periodically disconnect from everyone
         if cfg!(test) {
